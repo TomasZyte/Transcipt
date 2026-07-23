@@ -1,0 +1,6 @@
+{
+  "name": "Tranzip — Транскрибация Аудио и Видео",
+  "description": "Онлайн-сервис для распознавания речи из аудио и видеофайлов, спикер-диаризации, AI-суммаризации и экспорта субтитров SRT.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
