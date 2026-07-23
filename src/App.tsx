@@ -78,53 +78,152 @@ export default function App() {
   }) => {
     setIsProcessing(true);
     setErrorMessage(null);
-    setProcessPercent(10);
+    setProcessPercent(5);
     setProcessStep('Инициализация медиафайла...');
 
-    // Progress step simulation
-    const interval = setInterval(() => {
-      setProcessPercent((prev) => {
-        if (prev < 40) {
-          setProcessStep('Анализ медиапотока и частот...');
-          return prev + 10;
-        } else if (prev < 80) {
-          setProcessStep('Нейросетевая расшифровка Gemini 2.5 AI...');
-          return prev + 15;
-        } else if (prev < 95) {
-          setProcessStep('Формирование субтитров и спикер-диаризации...');
-          return prev + 5;
-        }
-        return prev;
-      });
-    }, 400);
-
     try {
-      const res = await fetch('/api/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      let recordData: any = null;
 
-      clearInterval(interval);
+      if (payload.chunks && payload.chunks.length > 0) {
+        // Multi-chunk mode: send each small ~5MB chunk as a separate HTTP request
+        // This strictly guarantees avoiding 413 Request Entity Too Large proxy limits
+        const totalChunks = payload.chunks.length;
+        const chunkResults: any[] = [];
+        let detectedLang = 'Русский';
+
+        for (let i = 0; i < totalChunks; i++) {
+          const chunk = payload.chunks[i];
+          const pct = 10 + Math.round(((i + 0.5) / totalChunks) * 75);
+          setProcessPercent(pct);
+          setProcessStep(`Расшифровка части ${i + 1} из ${totalChunks} нейросетью Gemini 3.6...`);
+
+          const chunkRes = await fetch('/api/transcribe-chunk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chunk,
+              options: payload.options,
+              fileName: payload.fileName,
+            }),
+          });
+
+          if (!chunkRes.ok) {
+            const text = await chunkRes.text();
+            let errStr = `Ошибка сервера (${chunkRes.status})`;
+            try {
+              const parsed = JSON.parse(text);
+              errStr = parsed.error || errStr;
+            } catch {
+              if (text) errStr = `Ошибка ${chunkRes.status}: ${text.slice(0, 150)}`;
+            }
+            throw new Error(errStr);
+          }
+
+          const chunkData = await chunkRes.json();
+          if (chunkData.success && chunkData.data) {
+            chunkResults.push(chunkData.data);
+            if (chunkData.data.languageDetected) {
+              detectedLang = chunkData.data.languageDetected;
+            }
+          }
+        }
+
+        if (chunkResults.length === 0) {
+          throw new Error('Не удалось расшифровать аудиофрагменты');
+        }
+
+        setProcessPercent(90);
+        setProcessStep('Анализ контекста и формирование AI-саммари...');
+
+        // Aggregate segments with adjusted offsets
+        const combinedSegments: any[] = [];
+        const combinedRawTextParts: string[] = [];
+
+        chunkResults.sort((a, b) => a.index - b.index).forEach((res) => {
+          const offset = res.offsetSec || 0;
+          if (res.segments) {
+            res.segments.forEach((seg: any, idx: number) => {
+              const adjStart = Math.round((seg.startSec || 0) + offset);
+              const adjEnd = Math.round((seg.endSec || 0) + offset);
+              combinedSegments.push({
+                id: `seg-${res.index + 1}-${idx + 1}`,
+                startSec: adjStart,
+                endSec: adjEnd,
+                timestamp: `${Math.floor(adjStart / 60).toString().padStart(2, '0')}:${Math.floor(adjStart % 60).toString().padStart(2, '0')}`,
+                speaker: seg.speaker || 'Спикер 1',
+                text: seg.text || '',
+              });
+            });
+          }
+          if (res.rawText) {
+            combinedRawTextParts.push(res.rawText.trim());
+          }
+        });
+
+        const combinedRawText = combinedRawTextParts.join('\n\n');
+
+        // Request final summary and SRT generation
+        const sumRes = await fetch('/api/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rawText: combinedRawText,
+            segments: combinedSegments,
+            fileName: payload.fileName,
+            fileType: payload.fileType,
+            mimeType: payload.mimeType,
+            languageDetected: detectedLang,
+          }),
+        });
+
+        if (!sumRes.ok) {
+          throw new Error('Ошибка генерации итогового AI-саммари');
+        }
+
+        const sumData = await sumRes.json();
+        if (sumData.success && sumData.data) {
+          recordData = sumData.data;
+        } else {
+          throw new Error('Не удалось обработать результаты расшифровки');
+        }
+
+      } else {
+        // Single payload mode (for mic recording, demo samples, or direct small files)
+        setProcessPercent(30);
+        setProcessStep('Расшифровка через нейросеть Gemini 3.6 AI...');
+
+        const res = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          let errorMsg = `Ошибка сервера (${res.status})`;
+          try {
+            const errBody = JSON.parse(text);
+            errorMsg = errBody.error || errorMsg;
+          } catch {
+            if (text) {
+              errorMsg = `Ошибка ${res.status}: ${text.slice(0, 200)}`;
+            }
+          }
+          throw new Error(errorMsg);
+        }
+
+        const data = await res.json();
+        if (data.success && data.data) {
+          recordData = data.data;
+        } else {
+          throw new Error(data.error || 'Ошибка при расшифровке медиафайла');
+        }
+      }
+
       setProcessPercent(100);
       setProcessStep('Готово!');
 
-      if (!res.ok) {
-        let errorMsg = 'Ошибка сервера при обработке файла';
-        try {
-          const errBody = await res.json();
-          errorMsg = errBody.error || errorMsg;
-        } catch (e) {
-          const rawText = await res.text();
-          errorMsg = `Ошибка ${res.status}: ${rawText.slice(0, 100)}`;
-        }
-        throw new Error(errorMsg);
-      }
-
-      const data = await res.json();
-
-      if (data.success && data.data) {
-        const recordData = data.data;
+      if (recordData) {
         const newRecord: TranscriptRecord = {
           id: `tr-${Date.now()}`,
           title: payload.fileName,
@@ -145,11 +244,8 @@ export default function App() {
 
         setCurrentTranscript(newRecord);
         saveToHistory(newRecord);
-      } else {
-        setErrorMessage(data.error || 'Ошибка при расшифровке медиафайла');
       }
     } catch (err: any) {
-      clearInterval(interval);
       setErrorMessage(err.message || 'Произошла ошибка при обработке медиафайла.');
     } finally {
       setIsProcessing(false);

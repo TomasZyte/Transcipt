@@ -32,6 +32,188 @@ async function startServer() {
     res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
+  // Chunk Transcription Endpoint (processes a small ~5MB chunk per HTTP request)
+  app.post('/api/transcribe-chunk', async (req, res) => {
+    try {
+      const { chunk, options } = req.body;
+      if (!chunk || !chunk.base64) {
+        return res.status(400).json({ error: 'Данные аудиофрагмента отсутствуют' });
+      }
+
+      const ai = getGeminiClient();
+      const languageInstruction = options?.language && options.language !== 'auto'
+        ? `Язык аудио: ${options.language}. Расшифруй строго на этом языке.`
+        : 'Автоматически определи язык речи (русский, английский, казахский и т.д.).';
+
+      const modeInstruction = options?.mode === 'clean'
+        ? 'Очисти текст от сорных слов (эээ, ну, как бы, типа) и заиканий, делая речь связной.'
+        : 'Делай максимально точный дословный транскрипт речи.';
+
+      const diarizationInstruction = options?.enableDiarization
+        ? 'Раздели диалог по спикерам (Спикер 1, Спикер 2 и т.д.). Указывай смену говорящего.'
+        : 'Используй обозначения Спикер 1 или единый текст.';
+
+      const glossaryInstruction = options?.customGlossary
+        ? `Специальный глоссарий и термины для контекста: ${options.customGlossary}`
+        : '';
+
+      const systemPrompt = `
+Ты — профессиональная система транскрибации речи и анализа медиафайлов.
+Твоя задача — прослушать переданный фрагмент аудиофайла и вернуть точную расшифровку речи с временными метками и разбивкой по спикерам.
+
+Инструкции:
+1. ${languageInstruction}
+2. ${modeInstruction}
+3. ${diarizationInstruction}
+4. ${glossaryInstruction}
+5. Разбей транскрипт на логические сегменты с временными метками (startSec, endSec, timestamp в формате MM:SS).
+`;
+
+      const base64Clean = chunk.base64.replace(/^data:[^;]+;base64,/, '');
+      const offsetSec = chunk.offsetSec || 0;
+      const index = chunk.index !== undefined ? chunk.index : 0;
+      const totalChunks = chunk.totalChunks || 1;
+
+      console.log(`Transcribing chunk ${index + 1}/${totalChunks} (offset ${offsetSec}s)...`);
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.6-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: chunk.mimeType || 'audio/wav', data: base64Clean } },
+              { text: `Расшифруй этот фрагмент аудиотега (часть ${index + 1} из ${totalChunks}). Смещение этого фрагмента: ${offsetSec} секунд.` },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              languageDetected: { type: Type.STRING },
+              rawText: { type: Type.STRING },
+              segments: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    startSec: { type: Type.NUMBER },
+                    endSec: { type: Type.NUMBER },
+                    timestamp: { type: Type.STRING },
+                    speaker: { type: Type.STRING },
+                    text: { type: Type.STRING },
+                  },
+                  required: ['id', 'startSec', 'endSec', 'timestamp', 'speaker', 'text'],
+                },
+              },
+            },
+            required: ['languageDetected', 'rawText', 'segments'],
+          },
+        },
+      });
+
+      const text = response.text || '';
+      if (!text) {
+        return res.status(500).json({ error: 'Пустой ответ от нейросети Gemini' });
+      }
+
+      const parsed = JSON.parse(text);
+      return res.json({
+        success: true,
+        data: {
+          index,
+          offsetSec,
+          languageDetected: parsed.languageDetected || 'Русский',
+          rawText: parsed.rawText || '',
+          segments: parsed.segments || [],
+        },
+      });
+    } catch (err: any) {
+      console.error('Chunk transcription error:', err);
+      return res.status(500).json({ error: err?.message || 'Ошибка расшифровки аудиофрагмента' });
+    }
+  });
+
+  // Summarize Full Transcript Endpoint
+  app.post('/api/summarize', async (req, res) => {
+    try {
+      const { rawText, segments, fileName, fileType, mimeType, languageDetected } = req.body;
+
+      const ai = getGeminiClient();
+      let summaryData = {
+        overview: 'Расшифровка медиафайла выполнена успешно.',
+        keyPoints: ['Подготовлен сплошной текст и хронологические сегменты.', 'Запись проанализирована нейросетью Gemini 2.5.'],
+        actionItems: ['Изучить ключевые выводы и скачать готовые субтитры.'],
+        sentiment: 'Нейтральный / Деловой',
+        topics: ['Медиазапись', 'Аудиоанализ']
+      };
+
+      if (rawText && rawText.trim().length > 0) {
+        try {
+          const summaryResponse = await ai.models.generateContent({
+            model: 'gemini-3.6-flash',
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: `Проанализируй полный расшифрованный текст и составь структурированное AI-саммари:\n\n"""\n${rawText.slice(0, 30000)}\n"""` }
+                ]
+              }
+            ],
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  overview: { type: Type.STRING },
+                  keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  actionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  sentiment: { type: Type.STRING },
+                  topics: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: ['overview', 'keyPoints', 'actionItems', 'sentiment', 'topics'],
+              }
+            }
+          });
+
+          if (summaryResponse.text) {
+            summaryData = JSON.parse(summaryResponse.text);
+          }
+        } catch (e) {
+          console.warn('Summary generation error:', e);
+        }
+      }
+
+      const safeSegments = segments || [];
+      const srtContent = buildSrtContent(safeSegments);
+      const wordCount = (rawText || '').split(/\s+/).filter(Boolean).length;
+      const durationEstimateSec = safeSegments.length > 0 ? safeSegments[safeSegments.length - 1].endSec : 60;
+
+      return res.json({
+        success: true,
+        data: {
+          languageDetected: languageDetected || 'Русский',
+          durationEstimateSec,
+          rawText: rawText || '',
+          segments: safeSegments,
+          summary: summaryData,
+          srtContent,
+          wordCount,
+          fileName: fileName || 'Запись',
+          fileType: fileType || 'audio',
+          mimeType: mimeType || 'audio/wav',
+        },
+      });
+    } catch (err: any) {
+      console.error('Summarize route error:', err);
+      return res.status(500).json({ error: err?.message || 'Ошибка генерации саммари' });
+    }
+  });
+
   // Main Transcription Endpoint
   app.post('/api/transcribe', async (req, res) => {
     try {
@@ -74,18 +256,20 @@ async function startServer() {
 
       // Handle multi-chunk media uploads (for long videos / high quality recordings)
       if (chunks && Array.isArray(chunks) && chunks.length > 0) {
-        console.log(`Processing ${chunks.length} audio chunks for ${fileName}...`);
+        console.log(`Processing ${chunks.length} audio chunks sequentially for ${fileName}...`);
         
-        const chunkPromises = chunks.map(async (chunk, i) => {
+        const validResults = [];
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
           const offsetSec = chunk.offsetSec || 0;
           const base64Clean = chunk.base64 ? chunk.base64.replace(/^data:[^;]+;base64,/, '') : '';
-          if (!base64Clean) return null;
+          if (!base64Clean) continue;
 
           console.log(`Sending chunk ${i + 1}/${chunks.length} (offset ${offsetSec}s, size ${(base64Clean.length * 0.75 / 1024 / 1024).toFixed(2)} MB)...`);
 
           try {
             const response = await ai.models.generateContent({
-              model: 'gemini-2.5-flash',
+              model: 'gemini-3.6-flash',
               contents: [
                 {
                   role: 'user',
@@ -125,17 +309,14 @@ async function startServer() {
             });
 
             const text = response.text || '';
-            if (!text) return null;
-            const parsed = JSON.parse(text);
-            return { index: i, offsetSec, ...parsed };
+            if (text) {
+              const parsed = JSON.parse(text);
+              validResults.push({ index: i, offsetSec, ...parsed });
+            }
           } catch (err) {
             console.error(`Chunk ${i + 1} error:`, err);
-            return null;
           }
-        });
-
-        const chunkResults = await Promise.all(chunkPromises);
-        const validResults = chunkResults.filter(Boolean).sort((a, b) => a!.index - b!.index);
+        }
 
         if (validResults.length > 0) {
           let combinedSegments: any[] = [];
@@ -143,13 +324,13 @@ async function startServer() {
           let detectedLang = validResults[0]!.languageDetected || 'Русский';
 
           validResults.forEach((res) => {
-            const offset = res!.offsetSec || 0;
-            if (res!.segments) {
-              res!.segments.forEach((seg: any, idx: number) => {
+            const offset = res.offsetSec || 0;
+            if (res.segments) {
+              res.segments.forEach((seg: any, idx: number) => {
                 const adjStart = Math.round((seg.startSec || 0) + offset);
                 const adjEnd = Math.round((seg.endSec || 0) + offset);
                 combinedSegments.push({
-                  id: `seg-${res!.index + 1}-${idx + 1}`,
+                  id: `seg-${res.index + 1}-${idx + 1}`,
                   startSec: adjStart,
                   endSec: adjEnd,
                   timestamp: formatTimestamp(adjStart),
@@ -158,8 +339,8 @@ async function startServer() {
                 });
               });
             }
-            if (res!.rawText) {
-              combinedRawTextParts.push(res!.rawText.trim());
+            if (res.rawText) {
+              combinedRawTextParts.push(res.rawText.trim());
             }
           });
 
@@ -227,6 +408,8 @@ async function startServer() {
               mimeType: mimeType || 'audio/wav',
             },
           });
+        } else {
+          return res.status(500).json({ error: 'Не удалось обработать аудиофрагменты через нейросеть Gemini.' });
         }
       }
 
@@ -240,10 +423,10 @@ async function startServer() {
             effectiveMime = 'video/mp4';
           }
 
-          console.log(`Sending single media payload to Gemini 2.5 Flash (mime: ${effectiveMime}, size: ${(base64Clean.length * 0.75 / 1024 / 1024).toFixed(2)} MB)...`);
+          console.log(`Sending single media payload to Gemini 3.6 Flash (mime: ${effectiveMime}, size: ${(base64Clean.length * 0.75 / 1024 / 1024).toFixed(2)} MB)...`);
 
           const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.6-flash',
             contents: [
               {
                 role: 'user',
@@ -392,7 +575,7 @@ ${transcriptText}
       }
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: prompt,
       });
 

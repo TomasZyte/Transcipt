@@ -3,6 +3,8 @@ export interface AudioChunk {
   mimeType: string;
   offsetSec: number;
   durationSec: number;
+  index: number;
+  totalChunks: number;
 }
 
 export interface ProcessedAudioResult {
@@ -18,48 +20,30 @@ export async function processMediaFileForTranscription(
 ): Promise<ProcessedAudioResult> {
   const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i) !== null;
 
-  if (onProgress) onProgress('Извлечение и подготовка аудиосигнала...');
-
-  // Try browser AudioContext audio track extraction (works for both audio & video files)
+  // Try browser AudioContext audio track extraction first for all media files
   try {
+    if (onProgress) onProgress('Извлечение и сжатие аудиопотока...');
     const arrayBuffer = await file.arrayBuffer();
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
 
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
     const durationSec = audioBuffer.duration;
 
-    if (onProgress) onProgress(`Аудиопоток декодирован (${Math.round(durationSec)} сек). Сжатие...`);
+    if (onProgress) onProgress(`Аудиопоток декодирован (${Math.round(durationSec / 60)} мин). Подготовка фрагментов...`);
 
-    // If audio is under 5 minutes (300 seconds), produce a single 16kHz mono WAV chunk
-    const CHUNK_DURATION = 300; // 5 minutes per chunk (~9.6 MB mono WAV)
-    const totalChunksCount = Math.ceil(durationSec / CHUNK_DURATION);
-
-    if (totalChunksCount <= 1) {
-      const slicedBuffer = sliceAudioBuffer(audioBuffer, 0, durationSec, audioCtx);
-      const wavBlob = audioBufferToMonoWav(slicedBuffer, 16000);
-      const base64 = await blobToBase64(wavBlob);
-      await audioCtx.close();
-
-      return {
-        durationSec,
-        chunks: [{
-          base64,
-          mimeType: 'audio/wav',
-          offsetSec: 0,
-          durationSec,
-        }],
-      };
-    }
-
-    // For longer files (>5 minutes), slice into 5-minute WAV chunks
+    // Use 120 seconds (2 minutes) per chunk -> ~3.8MB raw WAV, ~5MB base64
+    // This strictly prevents 413 Request Entity Too Large errors on HTTP POST
+    const CHUNK_DURATION = 120;
+    const totalChunksCount = Math.max(1, Math.ceil(durationSec / CHUNK_DURATION));
     const chunks: AudioChunk[] = [];
+
     for (let i = 0; i < totalChunksCount; i++) {
       const startSec = i * CHUNK_DURATION;
       const endSec = Math.min((i + 1) * CHUNK_DURATION, durationSec);
-      const chunkDuration = endSec - startSec;
+      const chunkDuration = Math.max(1, endSec - startSec);
 
       if (onProgress) {
-        onProgress(`Разделение на части: Фрагмент ${i + 1} из ${totalChunksCount}...`);
+        onProgress(`Обработка фрагмента ${i + 1} из ${totalChunksCount}...`);
       }
 
       const slicedBuffer = sliceAudioBuffer(audioBuffer, startSec, endSec, audioCtx);
@@ -71,6 +55,8 @@ export async function processMediaFileForTranscription(
         mimeType: 'audio/wav',
         offsetSec: startSec,
         durationSec: chunkDuration,
+        index: i,
+        totalChunks: totalChunksCount,
       });
     }
 
@@ -81,17 +67,21 @@ export async function processMediaFileForTranscription(
       chunks,
     };
   } catch (err) {
-    console.warn('AudioContext decoding failed, fallback to direct media file base64:', err);
+    console.warn('AudioContext decoding failed, fallback to direct file reader:', err);
 
-    if (onProgress) onProgress('Чтение медиафайла напрямую...');
-    const base64 = await fileToBase64(file);
+    // If file is small (< 6MB), send directly as base64
+    if (file.size <= 6 * 1024 * 1024) {
+      if (onProgress) onProgress('Чтение файла...');
+      const base64 = await fileToBase64(file);
+      return {
+        durationSec: 0,
+        chunks: [],
+        singleBase64: base64,
+        singleMimeType: file.type || (isVideo ? 'video/mp4' : 'audio/mp3'),
+      };
+    }
 
-    return {
-      durationSec: 0,
-      chunks: [],
-      singleBase64: base64,
-      singleMimeType: file.type || (isVideo ? 'video/mp4' : 'audio/mp3'),
-    };
+    throw new Error('Не удалось извлечь аудио из файла. Пожалуйста, убедитесь, что медиафайл корректен.');
   }
 }
 
