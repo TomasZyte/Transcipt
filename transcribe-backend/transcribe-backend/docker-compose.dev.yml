@@ -1,0 +1,70 @@
+# Локальный стенд БЕЗ облака — экономный вариант «на своём GPU».
+# Поднимает весь конвейер: API + очередь(Redis) + хранилище(MinIO) + GPU-воркер + LLM(Ollama).
+#   docker compose -f docker-compose.dev.yml up --build
+# Требуется NVIDIA Container Toolkit (для доступа контейнеров к GPU).
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio-data:/data"]
+
+  createbucket:
+    image: minio/mc
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set m http://minio:9000 minio minio12345) do sleep 1; done;
+      mc mb -p m/transcribe; exit 0;"
+
+  ollama:
+    image: ollama/ollama
+    ports: ["11434:11434"]
+    volumes: ["ollama-data:/root/.ollama"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+
+  worker:
+    build: ./worker
+    command: uvicorn local_server:app --host 0.0.0.0 --port 8001
+    environment:
+      DEVICE: cuda
+      COMPUTE_TYPE: float16          # int8 — если мало VRAM
+      ASR_MODEL: large-v3
+      HF_TOKEN: ${HF_TOKEN}          # токен HuggingFace для pyannote-диаризации
+      LLM_BASE_URL: http://ollama:11434/v1
+      LLM_MODEL: qwen2.5:7b-instruct
+      LLM_API_KEY: ollama
+    ports: ["8001:8001"]
+    depends_on: [ollama]
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+
+  api:
+    build: ./api
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: transcribe
+      S3_ACCESS_KEY: minio
+      S3_SECRET_KEY: minio12345
+      DISPATCH_BASE_URL: http://worker:8001   # локальный воркер (в проде -> RunPod)
+      CORS_ORIGINS: "*"
+    ports: ["8000:8000"]
+    depends_on: [redis, minio, worker]
+
+volumes:
+  minio-data:
+  ollama-data:

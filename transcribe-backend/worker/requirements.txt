@@ -1,0 +1,8 @@
+# torch/torchaudio уже в базовом образе pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime.
+# WhisperX подтянет совместимый torchaudio при необходимости.
+whisperx==3.3.1
+runpod==1.7.7
+openai==1.57.4
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
