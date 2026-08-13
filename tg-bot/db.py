@@ -90,6 +90,13 @@ async def add_usage(uid: int, minutes: float):
     await _db.commit()
 
 
+async def set_plan(uid: int, plan: str, months: int = 1):
+    await get_user(uid)
+    until = int(time.time()) + months * 30 * 86400
+    await _db.execute("UPDATE users SET plan=?, plan_until=? WHERE id=?", (plan, until, uid))
+    await _db.commit()
+
+
 async def set_glossary(uid: int, text: str):
     await _db.execute("UPDATE users SET glossary=? WHERE id=?", (text, uid))
     await _db.commit()

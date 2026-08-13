@@ -21,6 +21,11 @@ PRESIGN_TTL = int(os.getenv("PRESIGN_TTL", "3600"))
 
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
+# ЮKassa через Telegram Payments (@BotFather → Payments → ЮKassa)
+PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
+# Цена за 1 месяц, в копейках (RUB)
+PRICES = {"start": 59000, "pro": 129000}
+
 # Админы (Telegram user id через запятую) — доступ к генерации промокодов
 ADMINS = {int(x) for x in os.getenv("ADMINS", "").replace(" ", "").split(",") if x}
 
