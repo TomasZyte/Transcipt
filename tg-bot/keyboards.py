@@ -25,6 +25,14 @@ def result_kb(job_id: int) -> InlineKeyboardMarkup:
          b(text="💬 Спросить AI", callback_data=f"t:{j}:qa")],
         [b(text="🌍 Перевод", callback_data=f"tr:{j}:menu"),
          b(text="⬇️ Скачать", callback_data=f"ex:{j}:menu")],
+        [b(text="🏠 Главное меню", callback_data="home")],
+    ])
+
+
+def buy_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Купить Старт — 590 ₽", callback_data="buy:start")],
+        [InlineKeyboardButton(text="💳 Купить Про — 1290 ₽", callback_data="buy:pro")],
     ])
 
 

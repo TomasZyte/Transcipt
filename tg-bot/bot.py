@@ -9,7 +9,8 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import (Message, CallbackQuery, BufferedInputFile,
+                           LabeledPrice, PreCheckoutQuery)
 
 import config
 import db
@@ -29,9 +30,10 @@ class Flow(StatesGroup):
 
 
 # ---------- утилиты ----------
-async def send_long(msg: Message, text: str, **kw):
-    for i in range(0, len(text), 4000):
-        await msg.answer(text[i:i + 4000], **kw)
+async def send_long(msg: Message, text: str, reply_markup=None):
+    chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [""]
+    for idx, ch in enumerate(chunks):
+        await msg.answer(ch, reply_markup=reply_markup if idx == len(chunks) - 1 else None)
 
 
 def result_caption(t: dict) -> str:
@@ -79,7 +81,39 @@ async def tariffs(m: Message):
         "<b>Бизнес</b> — приватный инстанс и интеграции, по договорённости\n\n"
         "Есть промокод? Настройки → «Ввести промокод».",
         parse_mode="HTML",
+        reply_markup=kb.buy_kb() if config.PROVIDER_TOKEN else None,
     )
+
+
+# ---------- оплата (ЮKassa через Telegram Payments) ----------
+@dp.callback_query(F.data.startswith("buy:"))
+async def buy(c: CallbackQuery, bot: Bot):
+    plan = c.data.split(":")[1]
+    if not config.PROVIDER_TOKEN:
+        return await c.answer("Оплата пока не подключена.", show_alert=True)
+    title = config.PLANS[plan]["title"]
+    await bot.send_invoice(
+        chat_id=c.from_user.id,
+        title=f"Тариф «{title}» — 1 месяц",
+        description=f"Доступ к тарифу «{title}» на 30 дней.",
+        payload=f"plan:{plan}",
+        provider_token=config.PROVIDER_TOKEN,
+        currency="RUB",
+        prices=[LabeledPrice(label=f"Тариф {title}", amount=config.PRICES[plan])],
+    )
+    await c.answer()
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
+    await bot.answer_pre_checkout_query(q.id, ok=True)
+
+
+@dp.message(F.successful_payment)
+async def paid(m: Message):
+    plan = m.successful_payment.invoice_payload.split(":")[1]
+    await db.set_plan(m.from_user.id, plan, months=1)
+    await m.answer(f"Оплата прошла ✅ Тариф «{config.PLANS[plan]['title']}» активен на 30 дней. Спасибо!")
 
 
 @dp.message(F.text == "Узнать больше")
@@ -194,7 +228,7 @@ async def tool_cb(c: CallbackQuery, state: FSMContext):
     await c.answer("Обрабатываю…")
     text = job["transcript"].get("rawText", "")
     res = await rp.analyze(text, task=task, glossary="")
-    await send_long(c.message, res)
+    await send_long(c.message, res, reply_markup=kb.result_kb(int(jid)))
 
 
 @dp.message(Flow.qa)
@@ -207,7 +241,7 @@ async def qa_answer(m: Message, state: FSMContext):
     wait = await m.answer("💬 Думаю…")
     res = await rp.analyze(job["transcript"].get("rawText", ""), task="qa", question=m.text)
     await wait.delete()
-    await send_long(m, res)
+    await send_long(m, res, reply_markup=kb.result_kb(data["job_id"]))
 
 
 # ---------- callbacks: перевод ----------
@@ -215,14 +249,15 @@ async def qa_answer(m: Message, state: FSMContext):
 async def translate_cb(c: CallbackQuery):
     _, jid, code = c.data.split(":")
     if code == "menu":
-        return await c.message.edit_reply_markup(reply_markup=kb.translate_kb(int(jid)))
+        await c.answer()
+        return await c.message.answer("Выберите язык перевода:", reply_markup=kb.translate_kb(int(jid)))
     job = await db.get_job(int(jid))
     if not job:
         return await c.answer("Задание не найдено", show_alert=True)
     await c.answer(f"Перевод на {config.LANGS.get(code, code)}…")
     res = await rp.analyze(job["transcript"].get("rawText", ""), task="translate",
                            target_lang=config.LANGS.get(code, code))
-    await send_long(c.message, res)
+    await send_long(c.message, res, reply_markup=kb.result_kb(int(jid)))
 
 
 # ---------- callbacks: экспорт ----------
@@ -230,7 +265,8 @@ async def translate_cb(c: CallbackQuery):
 async def export_cb(c: CallbackQuery):
     _, jid, fmt = c.data.split(":")
     if fmt == "menu":
-        return await c.message.edit_reply_markup(reply_markup=kb.export_kb(int(jid)))
+        await c.answer()
+        return await c.message.answer("Формат файла:", reply_markup=kb.export_kb(int(jid)))
     job = await db.get_job(int(jid))
     if not job:
         return await c.answer("Задание не найдено", show_alert=True)
@@ -243,7 +279,15 @@ async def export_cb(c: CallbackQuery):
     else:
         content, fn = exporters.to_md(t, job["file_name"]), f"{name}.md"
     await c.answer()
-    await c.message.answer_document(BufferedInputFile(content.encode("utf-8"), filename=fn))
+    await c.message.answer_document(BufferedInputFile(content.encode("utf-8"), filename=fn),
+                                    reply_markup=kb.result_kb(int(jid)))
+
+
+# ---------- home ----------
+@dp.callback_query(F.data == "home")
+async def home_cb(c: CallbackQuery):
+    await c.answer()
+    await c.message.answer("Главное меню 👇", reply_markup=kb.main_menu)
 
 
 # ---------- settings callbacks ----------
