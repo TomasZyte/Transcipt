@@ -22,15 +22,16 @@ ASR_MODEL = os.getenv("ASR_MODEL", "large-v3")
 HF_TOKEN = os.getenv("HF_TOKEN")                   # токен HuggingFace для pyannote-диаризации
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 
-# LLM для саммари — любой OpenAI-совместимый endpoint (Ollama, vLLM, TGI, ...)
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "ollama")
+# LLM для саммари — локальная модель в этом же воркере (self-hosted, без внешних вызовов).
+# Грузится на тот же GPU рядом с Whisper. Меняется через переменную окружения LLM_MODEL.
+LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-3B-Instruct")
 
 # --- Ленивая загрузка тяжёлых моделей ---------------------------------------
 _asr_model = None
 _align_cache = {}          # language_code -> (model, metadata)
 _diarize_pipeline = None
+_llm = None
+_llm_tok = None
 
 
 def _load_asr():
@@ -96,9 +97,22 @@ def _build_srt(segments) -> str:
     return "\n".join(out)
 
 
-# --- LLM-саммари -------------------------------------------------------------
+# --- LLM-саммари (локальная модель в этом же воркере) ------------------------
+def _load_llm():
+    global _llm, _llm_tok
+    if _llm is None:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        _llm_tok = AutoTokenizer.from_pretrained(LLM_MODEL)
+        _llm = AutoModelForCausalLM.from_pretrained(
+            LLM_MODEL, torch_dtype=torch.float16, device_map=DEVICE,
+        )
+    return _llm, _llm_tok
+
+
 def summarize(raw_text: str, glossary: str = "") -> dict:
-    """Структурированное AI-саммари через локальную LLM (OpenAI-совместимый API)."""
+    """Структурированное AI-саммари через локальную LLM (без внешних вызовов)."""
+    import re
     fallback = {
         "overview": "Расшифровка выполнена успешно.",
         "keyPoints": [], "actionItems": [],
@@ -107,30 +121,30 @@ def summarize(raw_text: str, glossary: str = "") -> dict:
     if not raw_text.strip():
         return fallback
 
-    from openai import OpenAI
-    client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
-
-    system = (
-        "Ты — аналитик расшифровок встреч. Верни СТРОГО JSON с полями: "
-        "overview (строка), keyPoints (массив строк), actionItems (массив строк), "
-        "sentiment (строка), topics (массив строк). Отвечай на языке транскрипта."
-    )
-    user = (
-        (f"Глоссарий/термины: {glossary}\n\n" if glossary else "")
-        + "Проанализируй расшифрованный текст и составь саммари:\n\n\"\"\"\n"
-        + raw_text[:60000] + "\n\"\"\""
-    )
     try:
-        resp = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-            response_format={"type": "json_object"},
-            temperature=0.2,
+        model, tok = _load_llm()
+        system = (
+            "Ты — аналитик расшифровок встреч. Верни СТРОГО JSON (без пояснений, без markdown) "
+            "с полями: overview (строка), keyPoints (массив строк), actionItems (массив строк), "
+            "sentiment (строка), topics (массив строк). Отвечай на языке транскрипта."
         )
-        data = json.loads(resp.choices[0].message.content)
+        user = (
+            (f"Глоссарий/термины: {glossary}\n\n" if glossary else "")
+            + "Проанализируй расшифрованный текст и составь саммари:\n\n\"\"\"\n"
+            + raw_text[:12000] + "\n\"\"\""
+        )
+        prompt = tok.apply_chat_template(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            tokenize=False, add_generation_prompt=True,
+        )
+        inputs = tok(prompt, return_tensors="pt").to(model.device)
+        gen = model.generate(**inputs, max_new_tokens=700, do_sample=False)
+        text = tok.decode(gen[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        data = json.loads(match.group(0)) if match else {}
         return {**fallback, **data}
-    except Exception as e:  # LLM недоступна — не валим всю задачу
+    except Exception as e:  # не валим всю задачу, если саммари не удалось
         print(f"[summarize] LLM error: {e}")
         return fallback
 

@@ -1,6 +1,0 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.1
-python-multipart==0.0.17
-redis==5.2.1
-boto3==1.35.71
-httpx==0.28.1
