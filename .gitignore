@@ -1,8 +1,19 @@
-node_modules/
-build/
-dist/
-coverage/
-.DS_Store
+# секреты и данные — никогда в репозиторий
+.env
+*.env
+tg-bot/bot.db
+tg-bot/bot.db-journal
+tg-bot/logs/
+tg-bot/backups/
+*.db
 *.log
-.env*
-!.env.example
+
+# питон
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# прочее
+*.bak
+Thumbs.db
