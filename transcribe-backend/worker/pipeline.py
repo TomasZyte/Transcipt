@@ -25,6 +25,9 @@ BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 # LLM для саммари — локальная модель в этом же воркере (self-hosted, без внешних вызовов).
 # Грузится на тот же GPU рядом с Whisper. Меняется через переменную окружения LLM_MODEL.
 LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+# 4-битная загрузка через bitsandbytes: 7B занимает ~5 ГБ вместо ~15 и спокойно
+# живёт рядом с Whisper на 24 ГБ. Включается LLM_4BIT=1.
+LLM_4BIT = os.getenv("LLM_4BIT", "0") == "1"
 
 # --- Ленивая загрузка тяжёлых моделей ---------------------------------------
 _asr_model = None
@@ -104,15 +107,64 @@ def _load_llm():
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         _llm_tok = AutoTokenizer.from_pretrained(LLM_MODEL)
-        _llm = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL, torch_dtype=torch.float16, device_map=DEVICE,
-        )
+
+        kwargs = {"torch_dtype": torch.float16, "device_map": DEVICE}
+        if LLM_4BIT:
+            from transformers import BitsAndBytesConfig
+            kwargs = {
+                "device_map": "auto",
+                "quantization_config": BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                ),
+            }
+            print(f"[llm] {LLM_MODEL} в 4-битном режиме")
+
+        _llm = AutoModelForCausalLM.from_pretrained(LLM_MODEL, **kwargs)
     return _llm, _llm_tok
 
 
-def summarize(raw_text: str, glossary: str = "") -> dict:
-    """Структурированное AI-саммари через локальную LLM (без внешних вызовов)."""
+_SUM_SYSTEM = (
+    "Ты — аналитик расшифровок встреч. Верни СТРОГО JSON (без пояснений, без markdown) "
+    "с полями: overview (строка), keyPoints (массив строк), actionItems (массив строк), "
+    "sentiment (строка), topics (массив строк). Отвечай на языке транскрипта.\n"
+    "actionItems — ТОЛЬКО явные поручения и договорённости, прозвучавшие в записи "
+    "(«сделаем», «договорились», «пришлю»). Рассказ о прошлых достижениях, "
+    "обязанностях и опыте задачей НЕ является — в таком случае верни пустой массив."
+)
+
+
+def _json_from(text: str) -> dict:
     import re
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _dedup(items, limit):
+    """Убирает повторы между фрагментами, сохраняя порядок."""
+    seen, out = set(), []
+    for x in items:
+        if not isinstance(x, str):
+            continue
+        key = x.strip().lower()[:60]
+        if key and key not in seen:
+            seen.add(key)
+            out.append(x.strip())
+    return out[:limit]
+
+
+def summarize(raw_text: str, glossary: str = "") -> dict:
+    """Структурированное саммари через локальную LLM.
+
+    Длинная запись разбирается по фрагментам и сводится вторым проходом:
+    иначе на часовом совещании конспект получался по первым десяти минутам."""
     fallback = {
         "overview": "Расшифровка выполнена успешно.",
         "keyPoints": [], "actionItems": [],
@@ -121,29 +173,47 @@ def summarize(raw_text: str, glossary: str = "") -> dict:
     if not raw_text.strip():
         return fallback
 
+    gloss = f"Глоссарий/термины: {glossary}\n\n" if glossary else ""
+
     try:
-        model, tok = _load_llm()
-        system = (
-            "Ты — аналитик расшифровок встреч. Верни СТРОГО JSON (без пояснений, без markdown) "
-            "с полями: overview (строка), keyPoints (массив строк), actionItems (массив строк), "
-            "sentiment (строка), topics (массив строк). Отвечай на языке транскрипта."
-        )
-        user = (
-            (f"Глоссарий/термины: {glossary}\n\n" if glossary else "")
-            + "Проанализируй расшифрованный текст и составь саммари:\n\n\"\"\"\n"
-            + raw_text[:12000] + "\n\"\"\""
-        )
-        prompt = tok.apply_chat_template(
-            [{"role": "system", "content": system},
-             {"role": "user", "content": user}],
-            tokenize=False, add_generation_prompt=True,
-        )
-        inputs = tok(prompt, return_tensors="pt").to(model.device)
-        gen = model.generate(**inputs, max_new_tokens=700, do_sample=False)
-        text = tok.decode(gen[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        data = json.loads(match.group(0)) if match else {}
-        return {**fallback, **data}
+        chunks = _split(raw_text, ANALYZE_CHUNK)[:ANALYZE_MAX_CHUNKS]
+
+        # короткая запись — один проход, как раньше
+        if len(chunks) == 1:
+            out = _generate(_SUM_SYSTEM,
+                            f"{gloss}Проанализируй расшифровку и составь саммари:\n\n"
+                            f'"""\n{chunks[0]}\n"""', 700)
+            return {**fallback, **_json_from(out)}
+
+        # длинная — разбираем по фрагментам
+        parts = []
+        for i, c in enumerate(chunks, 1):
+            out = _generate(
+                _SUM_SYSTEM,
+                f"{gloss}Это фрагмент {i} из {len(chunks)} одной записи. "
+                f"Составь саммари только по нему:\n\n\"\"\"\n{c}\n\"\"\"", 500)
+            parts.append(_json_from(out))
+
+        points = _dedup([p for d in parts for p in d.get("keyPoints", [])], 10)
+        actions = _dedup([a for d in parts for a in d.get("actionItems", [])], 10)
+        topics = _dedup([t for d in parts for t in d.get("topics", [])], 8)
+        overviews = " ".join(d.get("overview", "") for d in parts if d.get("overview"))
+
+        final = _generate(
+            "Ты — аналитик расшифровок. Верни СТРОГО JSON с полями overview (строка, "
+            "2–4 предложения) и sentiment (строка). Без markdown и пояснений.",
+            "Ниже — краткие описания последовательных фрагментов одной записи. "
+            "Опиши запись целиком: о чём она, кто участвовал, чем закончилась. "
+            f"Не перечисляй фрагменты по отдельности.\n\n{overviews[:6000]}", 400)
+        head = _json_from(final)
+
+        return {
+            "overview": head.get("overview") or overviews[:600] or fallback["overview"],
+            "keyPoints": points,
+            "actionItems": actions,
+            "sentiment": head.get("sentiment") or fallback["sentiment"],
+            "topics": topics,
+        }
     except Exception as e:  # не валим всю задачу, если саммари не удалось
         print(f"[summarize] LLM error: {e}")
         return fallback
