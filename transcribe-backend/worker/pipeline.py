@@ -377,6 +377,39 @@ _TASKS = {
 }
 
 
+def _dedupe_lines(text: str, max_repeat: int = 2) -> str:
+    """Жадное декодирование (do_sample=False) на 3B регулярно скатывается в цикл:
+    одна строка или короткий цикл из трёх строк повторяется десятками раз.
+    Подряд идущие повторы убираем полностью, неподряд — не больше двух вхождений
+    (законные повторы вида «Аргументы: …» в разных пунктах должны выживать)."""
+    seen, out, prev = {}, [], None
+    for line in text.splitlines():
+        key = re.sub(r"\W+", " ", line).strip().lower()
+        if not key:
+            out.append(line)
+            prev = None
+            continue
+        if key == prev:
+            continue
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] > max_repeat:
+            continue
+        out.append(line)
+        prev = key
+    return "\n".join(out)
+
+
+def _drop_truncated_tail(text: str) -> str:
+    """Генерация упёрлась в лимит токенов — последняя строка гарантированно
+    оборвана на полуслове. Лучше её выбросить, чем отдать огрызок в документ."""
+    lines = [l for l in text.splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if len(lines) > 1:
+        lines.pop()
+    return "\n".join(lines)
+
+
 def _generate(system: str, user: str, max_new_tokens: int) -> str:
     model, tok = _load_llm()
     prompt = tok.apply_chat_template(
@@ -385,11 +418,16 @@ def _generate(system: str, user: str, max_new_tokens: int) -> str:
         tokenize=False, add_generation_prompt=True,
     )
     inputs = tok(prompt, return_tensors="pt").to(model.device)
-    gen = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
-    out = tok.decode(gen[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+    gen = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                         repetition_penalty=1.12)
+    new = gen[0][inputs["input_ids"].shape[1]:]
+    out = tok.decode(new, skip_special_tokens=True).strip()
     # Словесный запрет markdown модель соблюдает через раз, поэтому подчищаем руками:
     # звёздочки лезут в один режим и не лезут в другой, а формат должен быть один.
-    return out.replace("**", "").replace("__", "")
+    out = out.replace("**", "").replace("__", "")
+    if len(new) >= max_new_tokens:
+        out = _drop_truncated_tail(out)
+    return _dedupe_lines(out)
 
 
 def _split(text: str, size: int) -> list:
@@ -465,19 +503,16 @@ def _qa_chunks(chunks: list, question: str, gloss: str) -> str:
 
 _SECTIONS = ("ТЕМА", "УЧАСТНИКИ", "ОБСУЖДЕНИЕ", "РЕШЕНИЯ", "ЗАДАЧИ", "ОТКРЫТЫЕ ВОПРОСЫ")
 
+# ОБСУЖДЕНИЕ через модель НЕ сводим: фрагменты идут по времени, их объединение —
+# это и есть обсуждение всей записи, а любой вызов модели тут либо упирается в
+# лимит токенов на выходе, либо переписывает содержание. Склеиваем кодом.
+# ТЕМА тоже особый случай — см. _merge_protocol.
 _SECTION_MERGE = {
-    "ТЕМА": ("Ниже — варианты темы, каждый составлен по своему фрагменту одной записи. "
-             "Сформулируй ОДНУ строку, описывающую предмет всей записи целиком, а не "
-             "какой-то одной её части. Выведи только эту строку, без заголовка.", 120),
     "УЧАСТНИКИ": ("Ниже — списки участников по фрагментам одной записи. Сведи в один "
-                  "список без повторов: один человек — одна строка. Если один и тот же "
-                  "человек где-то назван по имени, а где-то «Спикер N» — оставь имя. "
-                  "Выведи только строки списка.", 220),
-    "ОБСУЖДЕНИЕ": ("Ниже — разборы обсуждения по фрагментам одной записи, в порядке "
-                   "звучания. Собери один список вопросов по всей записи, сохранив этот "
-                   "порядок. Сохрани КАЖДЫЙ содержательный пункт; объединяй только явные "
-                   "повторы одного и того же. Ничего не добавляй от себя. "
-                   "Выведи только строки списка.", 1300),
+                  "список: один человек — ровно одна строка, повторов быть не должно. "
+                  "Если один и тот же спикер где-то назван по имени, а где-то «Спикер N» — "
+                  "оставь имя. Если про одного человека сказано разное — объедини в одну "
+                  "строку. Выведи только строки списка.", 220),
     "РЕШЕНИЯ": ("Ниже — решения, выписанные по фрагментам одной записи. Собери в один "
                 "список без повторов. Ничего не добавляй. Выведи только строки списка.", 400),
     "ЗАДАЧИ": ("Ниже — задачи, выписанные по фрагментам одной записи. Собери в один "
@@ -543,9 +578,24 @@ def _parse_sections(text: str) -> dict:
     return out
 
 
+def _renumber(lines: list) -> list:
+    """Каждый фрагмент нумерует свои пункты с единицы. После склейки нумерация
+    должна быть сквозной, иначе в документе три раза начинается «1.»."""
+    out, n = [], 0
+    for l in lines:
+        m = re.match(r"^\d+[.)]\s*(.+)$", l)
+        if m:
+            n += 1
+            out.append(f"{n}. {m.group(1)}")
+        else:
+            out.append(l)
+    return out
+
+
 def _merge_protocol(partials: list, system: str) -> str:
     parsed = [_parse_sections(p) for p in partials]
-    doc = []
+    body = {}
+
     for sec in _SECTIONS:
         blocks = []
         for p in parsed:
@@ -554,21 +604,41 @@ def _merge_protocol(partials: list, system: str) -> str:
                 blocks.append("\n".join(lines))
 
         if not blocks:
-            body = _EMPTY_TEXT[sec]
-        elif len(blocks) == 1:
-            body = blocks[0]
-        else:
-            instr, budget = _SECTION_MERGE[sec]
-            body = _generate(system, f"{instr}\n\n" + "\n\n---\n\n".join(blocks), budget).strip()
-            plain = "\n".join(l for b in blocks for l in b.splitlines())
-            # Страховка: если сведение схлопнуло содержание или оборвалось по лимиту,
-            # честная склейка полезнее аккуратного огрызка.
-            if sec in ("ОБСУЖДЕНИЕ", "РЕШЕНИЯ", "ЗАДАЧИ") and len(body) < len(plain) * 0.45:
-                body = plain
-            body = "\n".join(_norm_line(l) for l in body.splitlines() if l.strip())
+            body[sec] = _EMPTY_TEXT[sec]
+            continue
+        if sec == "ОБСУЖДЕНИЕ":
+            flat = _dedupe_lines("\n".join(blocks)).splitlines()
+            body[sec] = "\n".join(_renumber([_norm_line(l) for l in flat if l.strip()]))
+            continue
+        if sec == "ТЕМА":
+            continue  # выводим ниже, из уже сведённого обсуждения
+        if len(blocks) == 1:
+            body[sec] = blocks[0]
+            continue
 
-        doc.append(f"{sec}:\n{body}")
-    return "\n\n".join(doc)
+        instr, budget = _SECTION_MERGE[sec]
+        got = _generate(system, f"{instr}\n\n" + "\n\n---\n\n".join(blocks), budget).strip()
+        if not got:
+            got = "\n".join(blocks)
+        body[sec] = "\n".join(_norm_line(l) for l in got.splitlines() if l.strip())
+
+    # Тему берём не из тем отдельных фрагментов: они описывают куски записи, и при
+    # сведении модель просто выбирает последний. По сведённому обсуждению получается
+    # тема всей записи, а не её финального эпизода.
+    disc = body.get("ОБСУЖДЕНИЕ", "")
+    if disc and disc != _EMPTY_TEXT["ОБСУЖДЕНИЕ"]:
+        body["ТЕМА"] = _generate(
+            system,
+            "Ниже — обсуждение одной записи целиком. Сформулируй ОДНУ строку: предмет "
+            "всей записи. Не описывай отдельный эпизод и не пересказывай последний пункт. "
+            "Выведи только эту строку, без заголовка и без списка.\n\n" + disc[:6000],
+            100,
+        ).splitlines()[0].strip() or _EMPTY_TEXT["ТЕМА"]
+    else:
+        cand = [l for p in parsed for l in p.get("ТЕМА", []) if not _placeholder(l)]
+        body["ТЕМА"] = cand[0] if cand else _EMPTY_TEXT["ТЕМА"]
+
+    return "\n\n".join(f"{s}:\n{body[s]}" for s in _SECTIONS)
 
 
 def analyze(text: str, task: str = "summary", target_lang: str = "",
@@ -620,10 +690,16 @@ def analyze(text: str, task: str = "summary", target_lang: str = "",
                 result = _generate(system, f"{gloss}{instruction}\n\nРасшифровка:\n\n{chunks[0]}",
                                    limit)
             else:
+                # Разборы фрагментов потом склеиваются, поэтому каждый должен быть
+                # коротким: развёрнутый разбор упирается в лимит токенов и обрывается
+                # на полуслове, а цитаты после склейки превращаются в стенограмму.
+                brief = ("Пиши сжато: в ОБСУЖДЕНИИ не больше шести пунктов, каждый — "
+                         "одна строка по существу. Цитаты не приводи, реплики не пересказывай "
+                         "построчно.\n\n") if spec["merge"] == "structure" else ""
                 partial = [
                     _generate(system,
-                              f"{gloss}{instruction}\n\nЭто фрагмент {i} из {len(chunks)}. "
-                              f"Разбери только его:\n\n{c}", limit)
+                              f"{gloss}{instruction}\n\n{brief}Это фрагмент {i} из "
+                              f"{len(chunks)}. Разбери только его:\n\n{c}", limit)
                     for i, c in enumerate(chunks, 1)
                 ]
                 if spec["merge"] == "structure":
