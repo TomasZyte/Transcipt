@@ -14,25 +14,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Модели вшиваем в образ: сетевой том привязал бы эндпоинт к одному
-# датацентру, а A5000 и 3090 живут в разных.
-# Этот слой стоит ДО копирования кода — иначе правка pipeline.py
-# заставляла бы качать все модели заново.
-ENV HF_HOME=/models \
-    HF_HUB_ENABLE_HF_TRANSFER=0
+# Модели в образ НЕ вшиваем: сборка с ними упирается в лимит RunPod в 30 минут
+# (экспорт двадцатигигабайтного образа не успевает). Скачиваются при первом
+# холодном старте. Если вернёмся к этой идее — вшивать только Whisper и модель
+# выравнивания (~4,5 ГБ), без LLM.
 
-ARG ASR_REPO=Systran/faster-whisper-large-v3
-ARG LLM_REPO=Qwen/Qwen2.5-3B-Instruct
-ARG ALIGN_RU=jonatasgrosman/wav2vec2-large-xlsr-53-russian
-
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('${ASR_REPO}'); \
-snapshot_download('${LLM_REPO}'); \
-snapshot_download('${ALIGN_RU}')"
-
-# Код меняется часто — держим его последним слоем
 COPY pipeline.py handler.py local_server.py ./
 
 CMD ["python", "handler.py"]
-
