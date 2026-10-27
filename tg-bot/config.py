@@ -22,9 +22,18 @@ PRESIGN_TTL = int(os.getenv("PRESIGN_TTL", "3600"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 # ЮKassa через Telegram Payments (@BotFather → Payments → ЮKassa)
-PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
-# Цена за 1 месяц, в копейках (RUB)
+PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "").strip()
+PAYMENTS_ENABLED = bool(PROVIDER_TOKEN)
+IS_TEST_PAYMENTS = ":TEST:" in PROVIDER_TOKEN
+
+# Цена за 1 месяц, в копейках (RUB). В send_invoice уходит как есть, без *100.
 PRICES = {"start": 59000, "pro": 129000}
+
+# Срок, на который начисляется подписка после оплаты
+SUB_DAYS = 30
+
+# Валюта счёта
+CURRENCY = "RUB"
 
 # Админы (Telegram user id через запятую) — доступ к генерации промокодов
 ADMINS = {int(x) for x in os.getenv("ADMINS", "").replace(" ", "").split(",") if x}
@@ -41,3 +50,21 @@ LANGS = {
     "ru": "Русский", "kk": "Қазақша", "en": "English", "de": "Deutsch",
     "es": "Español", "zh": "中文", "fr": "Français",
 }
+
+OFFER_URL = "https://telegra.ph/Publichnaya-oferta-servisa-Poslovnica-08-15"
+PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-servisa-Poslovnica-08-15"
+
+# --- Telegram Stars: второй способ оплаты ---
+STARS_ENABLED = os.getenv("STARS_ENABLED", "1") == "1"
+# Цена в звёздах. Ориентир: разработчик получает ~$0,013 за звезду при выводе,
+# пользователь покупает их примерно вдвое дороже. 500 ⭐ ≈ 590 ₽ вам на руки.
+# Курс меняется — сверьтесь перед запуском и правьте эти числа.
+PRICES_XTR = {"start": 500, "pro": 1100}
+
+# --- Публичный счётчик «нас уже N» ---
+SOCIAL_PROOF_MIN = int(os.getenv("SOCIAL_PROOF_MIN", "500"))
+
+# --- Свой Telegram Bot API сервер ---
+# Пусто = облако Telegram с лимитом 20 МБ. Заполните после установки сервера.
+LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
+

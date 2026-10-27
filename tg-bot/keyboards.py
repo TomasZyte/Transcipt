@@ -30,10 +30,24 @@ def result_kb(job_id: int) -> InlineKeyboardMarkup:
 
 
 def buy_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Купить Старт — 590 ₽", callback_data="buy:start")],
-        [InlineKeyboardButton(text="💳 Купить Про — 1290 ₽", callback_data="buy:pro")],
-    ])
+    """Рубли — основной способ, звёзды — второй.
+    Правила Telegram требуют возможности оплатить цифровые услуги в Stars."""
+    b = InlineKeyboardButton
+    rows = []
+
+    if config.PAYMENTS_ENABLED:
+        rows.append([b(text=f"💳 Старт — {config.PRICES['start'] // 100} ₽",
+                       callback_data="buy:start")])
+        rows.append([b(text=f"💳 Про — {config.PRICES['pro'] // 100} ₽",
+                       callback_data="buy:pro")])
+
+    if config.STARS_ENABLED:
+        rows.append([b(text=f"⭐ Старт — {config.PRICES_XTR['start']}",
+                       callback_data="stars:start"),
+                     b(text=f"⭐ Про — {config.PRICES_XTR['pro']}",
+                       callback_data="stars:pro")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def export_kb(job_id: int) -> InlineKeyboardMarkup:
