@@ -67,4 +67,4 @@ SOCIAL_PROOF_MIN = int(os.getenv("SOCIAL_PROOF_MIN", "500"))
 # --- Свой Telegram Bot API сервер ---
 # Пусто = облако Telegram с лимитом 20 МБ. Заполните после установки сервера.
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
-
+TG_TIMEOUT = int(os.getenv("TG_TIMEOUT", "1800"))

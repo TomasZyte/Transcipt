@@ -10,6 +10,7 @@ import traceback
 import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
+from functools import wraps
 
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
@@ -139,6 +140,16 @@ def _safe_err(e: object) -> str:
     return _TOKEN_RE.sub("***", s)
 
 
+class RedactingFormatter(logging.Formatter):
+    def format(self, record):
+        # Redact after formatting so exception messages and tracebacks are covered.
+        return _safe_err(super().format(record))
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(RedactingFormatter("%(levelname)s:%(name)s:%(message)s"))
+
+
 class FileGoneError(RuntimeError):
     """getFile вернул путь, которого нет на диске: файл уже обработан и удалён."""
 
@@ -158,18 +169,22 @@ async def fetch_to_disk(bot: Bot, file_id: str) -> Path:
     src = f.file_path
     dst = TMP_DIR / f"{uuid.uuid4().hex}{Path(src or '').suffix or '.bin'}"
 
-    if getattr(config, "LOCAL_BOT_API", "") and src and os.path.isabs(src):
-        if not os.path.exists(src):
-            logging.warning("local file missing, file_id=%s", file_id)
-            raise FileGoneError(file_id)
-        try:
-            os.replace(src, dst)      # один том — переименование, без копирования
-        except OSError:
-            shutil.move(src, dst)     # разные тома — копирование с удалением
+    try:
+        if getattr(config, "LOCAL_BOT_API", "") and src and os.path.isabs(src):
+            if not os.path.exists(src):
+                logging.warning("local file missing, file_id=%s", file_id)
+                raise FileGoneError(file_id)
+            try:
+                os.replace(src, dst)  # один том — переименование, без копирования
+            except OSError:
+                shutil.move(src, dst)  # разные тома — копирование с удалением
+        else:
+            await bot.download_file(src, dst)
         return dst
-
-    await bot.download_file(src, dst)  # облачный Bot API: aiogram пишет чанками
-    return dst
+    except BaseException:
+        if dst.exists():
+            _drop_tmp(dst)
+        raise
 
 
 def _drop_tmp(path) -> None:
@@ -273,14 +288,19 @@ def result_caption(t: dict) -> str:
     s = t.get("summary", {}) or {}
     speakers = len({seg.get("speaker") for seg in t.get("segments", [])})
     dur = int(t.get("durationEstimateSec", 0))
-    head = (f"✅ <b>{t.get('fileName','Запись')}</b>\n"
-            f"Язык: {t.get('languageDetected','?')} · Спикеров: {speakers} · "
+    # Budget in UTF-16 units before escaping; never cut an HTML tag/entity.
+    def safe(value, units):
+        value = str(value).encode("utf-16-le")[:units * 2].decode("utf-16-le", errors="ignore")
+        return html.escape(value)
+
+    head = (f"✅ <b>{safe(t.get('fileName','Запись'), 250)}</b>\n"
+            f"Язык: {safe(t.get('languageDetected','?'), 40)} · Спикеров: {speakers} · "
             f"{dur//60} мин {dur%60} сек\n")
     if s.get("overview"):
-        head += f"\n<b>Кратко:</b> {s['overview']}\n"
+        head += f"\n<b>Кратко:</b> {safe(s['overview'], 1800)}\n"
     if s.get("keyPoints"):
-        head += "\n<b>Тезисы:</b>\n" + "\n".join(f"• {x}" for x in s["keyPoints"][:6])
-    return head[:4000]
+        head += "\n<b>Тезисы:</b>\n" + "\n".join(f"• {safe(x, 250)}" for x in s["keyPoints"][:6])
+    return head
 
 
 async def balance_text(uid: int) -> str:
@@ -427,7 +447,7 @@ async def tariffs(m: Message, state: FSMContext):
         "Подписка на 30 дней, продление вручную — автосписаний нет.\n"
         "Есть промокод? Настройки → «Ввести промокод».",
         parse_mode="HTML",
-        reply_markup=kb.buy_kb() if config.PAYMENTS_ENABLED else None,
+        reply_markup=kb.buy_kb() if (config.PAYMENTS_ENABLED or config.STARS_ENABLED) else None,
     )
 
 
@@ -488,15 +508,30 @@ async def buy_stars(c: CallbackQuery, bot: Bot):
     await c.answer()
 
 
-@dp.pre_checkout_query()
-async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
-    ok, err = False, "Счёт устарел — откройте оплату заново."
+def invoice_plan(payload: str, uid: int, currency: str, amount: int,
+                 *, checkout: bool = False) -> str | None:
     try:
-        kind, plan, uid, _ts = q.invoice_payload.split(":")
-        if kind == "plan" and plan in config.PRICES and int(uid) == q.from_user.id:
-            ok, err = True, None
+        kind, plan, owner, stamp = payload.split(":")
+        if kind != "plan" or int(owner) != uid or int(stamp) < 0:
+            return None
+        if currency == "XTR":
+            prices, enabled = config.PRICES_XTR, config.STARS_ENABLED
+        elif currency == config.CURRENCY:
+            prices, enabled = config.PRICES, config.PAYMENTS_ENABLED
+        else:
+            return None
+        if (not checkout or enabled) and plan in prices and amount == prices[plan]:
+            return plan
     except (ValueError, AttributeError):
         pass
+    return None
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
+    ok = invoice_plan(q.invoice_payload, q.from_user.id, q.currency, q.total_amount,
+                      checkout=True) is not None
+    err = None if ok else "Счёт устарел — откройте оплату заново."
     await bot.answer_pre_checkout_query(q.id, ok=ok, error_message=err)
 
 
@@ -504,22 +539,29 @@ async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
 async def paid(m: Message, bot: Bot, state: FSMContext):
     await state.clear()
     sp = m.successful_payment
-    plan = sp.invoice_payload.split(":")[1]
+    plan = invoice_plan(sp.invoice_payload, m.from_user.id, sp.currency, sp.total_amount)
+    if plan is None:
+        # Money has already moved. Do not silently accept a mismatched invoice.
+        await db.log_event(m.from_user.id, "payment_review", sp.telegram_payment_charge_id)
+        await notify_admins(bot, "⚠️ Платёж требует ручной проверки: "
+                            f"<code>{html.escape(sp.telegram_payment_charge_id)}</code>, "
+                            f"пользователь {m.from_user.id}, {sp.total_amount} {html.escape(sp.currency)}")
+        return await m.answer(f"Платёж получен, но требует проверки. Напишите {SUPPORT}.")
     oi = sp.order_info
 
-    pid = await db.add_payment(
+    result = await db.apply_payment(
         uid=m.from_user.id, plan=plan, amount=sp.total_amount, currency=sp.currency,
         charge_id=sp.telegram_payment_charge_id,
         provider_charge_id=sp.provider_payment_charge_id,
         email=oi.email if oi else None,
         phone=oi.phone_number if oi else None,
         name=oi.name if oi else None,
-        is_test=config.IS_TEST_PAYMENTS,
+        is_test=config.IS_TEST_PAYMENTS and sp.currency != "XTR",
     )
-    if pid is None:
+    if result is None:
         return
 
-    until = await db.extend_plan(m.from_user.id, plan, months=1)
+    pid, until = result
     stars = sp.currency == "XTR"
     amount_txt = (f"{sp.total_amount} ⭐" if stars
                   else f"{sp.total_amount / 100:.0f} {sp.currency}")
@@ -558,8 +600,7 @@ async def about(m: Message, state: FSMContext):
         m, "about",
         "<b>Poslovnica — расшифровка встреч, звонков и интервью</b>\n\n"
         "Загружаете запись — получаете готовый документ: кто что сказал, точные "
-        "тайм-коды, конспект и список задач. Без ручной вычитки и без пересылки "
-        "ваших записей в чужие облака.",
+        "тайм-коды, конспект и список задач. Результат можно скачать и отредактировать.",
     )
     await m.answer(
         "<b>Что можно прислать</b>\n"
@@ -580,9 +621,9 @@ async def about(m: Message, state: FSMContext):
         "распадается на трёх. Конспект считает языковая модель на том же сервере.\n\n"
 
         "<b>Приватность</b>\n"
-        "Обработка идёт на арендованном GPU под нашим управлением. Записи не "
-        "передаются в сторонние сервисы распознавания и не используются для обучения "
-        "моделей. Исходный файл удаляется из хранилища после обработки.\n\n"
+        "Для обработки файлы загружаются в Cloudflare R2 и передаются на GPU RunPod. "
+        "После загрузки локальная временная копия удаляется. Расшифровка сохраняется "
+        "в базе бота для экспорта и работы инструментов.\n\n"
 
         "<b>Кому подходит</b>\n"
         "Руководителям и ассистентам — протоколы совещаний. Продажам — разбор звонков. "
@@ -703,9 +744,10 @@ async def receipt_cmd(m: Message, command: CommandObject, bot: Bot):
             row["user_id"],
             f"🧾 Чек по оплате тарифа «{config.PLANS[row['plan']]['title']}»:\n{parts[1]}",
         )
+        await db.mark_receipt_sent(int(parts[0]), parts[1])
         await m.answer(f"Чек по платежу #{parts[0]} отправлен.")
     except Exception as e:
-        await m.answer(f"Чек записан, но отправить не вышло: {e}")
+        await m.answer(f"Чек записан, но отправить не вышло: {_safe_err(e)}")
 
 
 @dp.message(Command("refundstars"))
@@ -735,7 +777,9 @@ async def pending_cmd(m: Message):
     if not rows:
         return await m.answer("Все чеки отправлены 👍")
     await m.answer("Ждут чека:\n" + "\n".join(
-        f"#{r['id']} · {r['amount'] / 100:.0f} ₽ · {config.PLANS[r['plan']]['title']} · "
+        f"#{r['id']} · "
+        + (f"{r['amount']} ⭐" if r['currency'] == 'XTR' else f"{r['amount'] / 100:.0f} ₽")
+        + f" · {config.PLANS[r['plan']]['title']} · "
         f"{r['email'] or 'без email'} · "
         f"{time.strftime('%d.%m', time.localtime(r['created']))}" for r in rows))
 
@@ -902,7 +946,27 @@ def _limit_message(err: str, allowed: int) -> str | None:
     return None
 
 
+_active_transcriptions: set[int] = set()
+
+
+def one_transcription(fn):
+    """One in-flight file/link per user in the single polling process."""
+    @wraps(fn)
+    async def wrapped(m, *args, **kwargs):
+        uid = m.from_user.id
+        # No await between check and add: atomic within this event loop.
+        if uid in _active_transcriptions:
+            return await m.answer("Предыдущая запись ещё обрабатывается. Дождитесь результата.")
+        _active_transcriptions.add(uid)
+        try:
+            return await fn(m, *args, **kwargs)
+        finally:
+            _active_transcriptions.discard(uid)
+    return wrapped
+
+
 @dp.message(F.voice | F.audio | F.video | F.video_note | F.document)
+@one_transcription
 async def on_media(m: Message, bot: Bot, state: FSMContext):
     await state.clear()
     media = _extract_media(m)
@@ -913,7 +977,7 @@ async def on_media(m: Message, bot: Bot, state: FSMContext):
     allowed, deny = await allowed_minutes(m.from_user.id)
     if not allowed:
         await db.log_event(m.from_user.id, "limit_min", "0 left")
-        return await m.answer(deny, reply_markup=kb.buy_kb() if config.PAYMENTS_ENABLED else None)
+        return await m.answer(deny, reply_markup=kb.buy_kb() if (config.PAYMENTS_ENABLED or config.STARS_ENABLED) else None)
 
     # Быстрый отказ, когда длительность известна (голосовые, аудио, видео).
     # Для документов Telegram её не сообщает — там потолок проверит воркер по ffprobe,
@@ -923,7 +987,7 @@ async def on_media(m: Message, bot: Bot, state: FSMContext):
         return await m.answer(
             f"На эту запись нужно ~{int(duration / 60)} мин, а сейчас доступно {allowed}.\n\n"
             "Это минимум из лимита тарифа на один файл и остатка минут за месяц.",
-            reply_markup=kb.buy_kb() if config.PAYMENTS_ENABLED else None,
+            reply_markup=kb.buy_kb() if (config.PAYMENTS_ENABLED or config.STARS_ENABLED) else None,
         )
 
     started = time.time()
@@ -945,9 +1009,8 @@ async def on_media(m: Message, bot: Bot, state: FSMContext):
                                     max_duration_sec=allowed * 60)
             t["fileName"] = file_name
 
-            job_id = await db.save_job(m.from_user.id, file_name, t)
             mins = (t.get("durationEstimateSec") or duration or 0) / 60
-            await db.add_usage(m.from_user.id, mins)
+            job_id = await db.save_job(m.from_user.id, file_name, t, minutes=mins)
             await db.log_event(m.from_user.id, "file",
                                f"{file_name} · {mins:.1f} мин · {time.time()-started:.0f}с")
 
@@ -972,7 +1035,7 @@ async def on_media(m: Message, bot: Bot, state: FSMContext):
         limit_msg = _limit_message(str(e), allowed)
         if limit_msg:
             return await m.answer(
-                limit_msg, reply_markup=kb.buy_kb() if config.PAYMENTS_ENABLED else None)
+                limit_msg, reply_markup=kb.buy_kb() if (config.PAYMENTS_ENABLED or config.STARS_ENABLED) else None)
 
         await m.answer(
             "Не получилось обработать запись. Мы уже знаем о проблеме и разбираемся.\n"
@@ -1008,12 +1071,27 @@ async def on_media(m: Message, bot: Bot, state: FSMContext):
 
 
 # ---------- callbacks: инструменты ----------
+async def callback_job(c: CallbackQuery, actions) -> tuple[dict, str] | None:
+    try:
+        _, jid, action = c.data.split(":")
+        if action not in actions:
+            raise ValueError("Unknown action")
+        job = await db.get_job(int(jid), c.from_user.id)
+    except (ValueError, AttributeError):
+        job = None
+    if not job:
+        await c.answer("Задание не найдено", show_alert=True)
+        return None
+    return job, action
+
+
 @dp.callback_query(F.data.startswith("t:"))
 async def tool_cb(c: CallbackQuery, state: FSMContext):
-    _, jid, task = c.data.split(":")
-    job = await db.get_job(int(jid))
-    if not job:
-        return await c.answer("Задание не найдено", show_alert=True)
+    found = await callback_job(c, {*TASK_LABELS, "qa"})
+    if not found:
+        return
+    job, task = found
+    jid = job["id"]
     if task == "qa":
         await state.set_state(Flow.qa)
         await state.update_data(job_id=int(jid))
@@ -1027,7 +1105,7 @@ async def tool_cb(c: CallbackQuery, state: FSMContext):
         res = await rp.analyze(text, task=task, glossary=u["glossary"] or "")
     await send_long(c.message, res, reply_markup=kb.result_kb(int(jid)))
 
-@dp.message(Flow.qa)
+@dp.message(Flow.qa, F.text)
 async def qa_answer(m: Message, state: FSMContext):
     if is_interrupt(m):
         await state.clear()
@@ -1035,7 +1113,7 @@ async def qa_answer(m: Message, state: FSMContext):
 
     data = await state.get_data()
     await state.clear()
-    job = await db.get_job(data["job_id"])
+    job = await db.get_job(data.get("job_id"), m.from_user.id)
     if not job:
         return await m.answer("Задание не найдено.")
 
@@ -1050,14 +1128,15 @@ async def qa_answer(m: Message, state: FSMContext):
 # ---------- callbacks: перевод ----------
 @dp.callback_query(F.data.startswith("tr:"))
 async def translate_cb(c: CallbackQuery):
-    _, jid, code = c.data.split(":")
+    found = await callback_job(c, {*config.LANGS, "menu"})
+    if not found:
+        return
+    job, code = found
+    jid = job["id"]
     if code == "menu":
         await c.answer()
         return await c.message.answer("Выберите язык перевода:",
                                       reply_markup=kb.translate_kb(int(jid)))
-    job = await db.get_job(int(jid))
-    if not job:
-        return await c.answer("Задание не найдено", show_alert=True)
 
     await c.answer()
     lang = config.LANGS.get(code, code)
@@ -1068,18 +1147,19 @@ async def translate_cb(c: CallbackQuery):
                                target_lang=lang, glossary=u["glossary"] or "")
     await send_long(c.message, res, reply_markup=kb.result_kb(int(jid)))
 
-    
+
 
 # ---------- callbacks: экспорт ----------
 @dp.callback_query(F.data.startswith("ex:"))
 async def export_cb(c: CallbackQuery):
-    _, jid, fmt = c.data.split(":")
+    found = await callback_job(c, {"menu", "srt", "txt", "md"})
+    if not found:
+        return
+    job, fmt = found
+    jid = job["id"]
     if fmt == "menu":
         await c.answer()
         return await c.message.answer("Формат файла:", reply_markup=kb.export_kb(int(jid)))
-    job = await db.get_job(int(jid))
-    if not job:
-        return await c.answer("Задание не найдено", show_alert=True)
     t = job["transcript"]
     name = job["file_name"].rsplit(".", 1)[0]
     if fmt == "srt":
@@ -1121,7 +1201,7 @@ async def set_gloss(c: CallbackQuery, state: FSMContext):
     await c.answer()
 
 
-@dp.message(Flow.promo)
+@dp.message(Flow.promo, F.text)
 async def promo_input(m: Message, state: FSMContext):
     if is_interrupt(m):
         await state.clear()
@@ -1133,7 +1213,7 @@ async def promo_input(m: Message, state: FSMContext):
     await m.answer(txt)
 
 
-@dp.message(Flow.glossary)
+@dp.message(Flow.glossary, F.text)
 async def gloss_input(m: Message, state: FSMContext):
     if is_interrupt(m):
         await state.clear()
@@ -1146,6 +1226,7 @@ async def gloss_input(m: Message, state: FSMContext):
 
 # ---------- расшифровка по ссылке ----------
 @dp.message(F.text.regexp(r"https?://"))
+@one_transcription
 async def on_link(m: Message, state: FSMContext, bot: Bot):
     await state.clear()
     url = LINK_RE.search(m.text).group(0)
@@ -1153,7 +1234,7 @@ async def on_link(m: Message, state: FSMContext, bot: Bot):
     allowed, deny = await allowed_minutes(m.from_user.id)
     if not allowed:
         await db.log_event(m.from_user.id, "limit_min", "link, 0 left")
-        return await m.answer(deny, reply_markup=kb.buy_kb() if config.PAYMENTS_ENABLED else None)
+        return await m.answer(deny, reply_markup=kb.buy_kb() if (config.PAYMENTS_ENABLED or config.STARS_ENABLED) else None)
 
     started = time.time()
     try:
@@ -1164,9 +1245,8 @@ async def on_link(m: Message, state: FSMContext, bot: Bot):
             t = await rp.transcribe_url(url, options, max_duration_sec=allowed * 60)
             t["fileName"] = t.get("fileName") or "Запись по ссылке"
 
-            job_id = await db.save_job(m.from_user.id, t["fileName"], t)
             mins = (t.get("durationEstimateSec") or 0) / 60
-            await db.add_usage(m.from_user.id, mins)
+            job_id = await db.save_job(m.from_user.id, t["fileName"], t, minutes=mins)
             await db.log_event(m.from_user.id, "link",
                                f"{url[:80]} · {mins:.1f} мин · {time.time()-started:.0f}с")
 
@@ -1179,7 +1259,7 @@ async def on_link(m: Message, state: FSMContext, bot: Bot):
         limit_msg = _limit_message(err, allowed)
         if limit_msg:
             return await m.answer(
-                limit_msg, reply_markup=kb.buy_kb() if config.PAYMENTS_ENABLED else None)
+                limit_msg, reply_markup=kb.buy_kb() if (config.PAYMENTS_ENABLED or config.STARS_ENABLED) else None)
 
         blocked = any(s in err.lower() for s in
                       ("sign in", "confirm you", "403", "private", "unavailable",

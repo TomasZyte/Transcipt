@@ -9,23 +9,26 @@ _headers = {"Authorization": f"Bearer {config.RUNPOD_API_KEY}",
 
 
 async def _run_and_wait(payload: dict, timeout_s: int = 3600) -> dict:
-    async with httpx.AsyncClient(timeout=60) as cli:
+    # Includes HTTP request time, not just the sleeps between status polls.
+    async with asyncio.timeout(timeout_s), httpx.AsyncClient(timeout=60) as cli:
         r = await cli.post(f"{config.RUNPOD_BASE}/run", json={"input": payload}, headers=_headers)
         r.raise_for_status()
         job_id = r.json()["id"]
-        waited = 0
-        while waited < timeout_s:
+        while True:
             await asyncio.sleep(3)
-            waited += 3
             s = await cli.get(f"{config.RUNPOD_BASE}/status/{job_id}", headers=_headers)
             s.raise_for_status()
             data = s.json()
             st = data.get("status")
             if st == "COMPLETED":
-                return data.get("output", {})
-            if st == "FAILED":
-                raise RuntimeError(data.get("error", "RunPod job FAILED"))
-        raise TimeoutError("RunPod job timeout")
+                output = data.get("output")
+                if not isinstance(output, dict):
+                    raise RuntimeError("RunPod returned invalid output")
+                if output.get("error"):
+                    raise RuntimeError(str(output["error"]))
+                return output
+            if st in {"FAILED", "CANCELLED", "TIMED_OUT"}:
+                raise RuntimeError(data.get("error") or f"RunPod job {st}")
 
 
 async def transcribe(media_url: str, file_name: str, file_type: str,

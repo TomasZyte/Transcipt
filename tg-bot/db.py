@@ -1,18 +1,47 @@
 """SQLite (aiosqlite): пользователи, лимиты, задания, промокоды, платежи, события."""
+import asyncio
 import csv
 import io
 import json
-import sqlite3
+import math
 import time
+from functools import wraps
 import aiosqlite
 
 import config
 
 _db: aiosqlite.Connection | None = None
+_lock = asyncio.Lock()
+_owner: asyncio.Task | None = None
+
+
+def serialized(fn):
+    """Keep each operation on the shared connection in one task, including commits.
+
+    Nested calls by the same task are allowed; another handler must not commit
+    a payment/job transaction halfway through. Roll back failed writes as well.
+    """
+    @wraps(fn)
+    async def wrapped(*args, **kwargs):
+        global _owner
+        task = asyncio.current_task()
+        if _owner is task:
+            return await fn(*args, **kwargs)
+        async with _lock:
+            _owner = task
+            try:
+                return await fn(*args, **kwargs)
+            except BaseException:
+                await _db.rollback()
+                raise
+            finally:
+                _owner = None
+    return wrapped
 
 
 async def init(path: str = None):
-    global _db
+    global _db, _lock, _owner
+    _lock, _owner = asyncio.Lock(), None
     _db = await aiosqlite.connect(path or config.DB_PATH)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(
@@ -115,6 +144,7 @@ def _month() -> str:
     return f"{t.tm_year}-{t.tm_mon:02d}"
 
 
+@serialized
 async def get_user(uid: int) -> aiosqlite.Row:
     cur = await _db.execute("SELECT * FROM users WHERE id=?", (uid,))
     row = await cur.fetchone()
@@ -129,11 +159,13 @@ async def get_user(uid: int) -> aiosqlite.Row:
     return row
 
 
+@serialized
 async def user_exists(uid: int) -> bool:
     cur = await _db.execute("SELECT 1 FROM users WHERE id=?", (uid,))
     return await cur.fetchone() is not None
 
 
+@serialized
 async def touch_user(uid: int, username=None, first_name=None, last_name=None,
                      lang_code=None, is_premium=False, source=None, is_file=False):
     """Обновляет профиль и счётчики на каждом действии. source пишется только один раз."""
@@ -153,6 +185,7 @@ async def touch_user(uid: int, username=None, first_name=None, last_name=None,
     await _db.commit()
 
 
+@serialized
 async def log_event(uid: int, kind: str, detail: str = ""):
     await _db.execute(
         "INSERT INTO events(user_id, kind, detail, created) VALUES(?,?,?,?)",
@@ -161,6 +194,7 @@ async def log_event(uid: int, kind: str, detail: str = ""):
     await _db.commit()
 
 
+@serialized
 async def effective_plan(uid: int) -> str:
     u = await get_user(uid)
     if u["plan"] != "free" and u["plan_until"] and u["plan_until"] < time.time():
@@ -170,6 +204,7 @@ async def effective_plan(uid: int) -> str:
     return u["plan"]
 
 
+@serialized
 async def remaining_minutes(uid: int) -> float:
     u = await get_user(uid)
     plan = await effective_plan(uid)
@@ -178,14 +213,23 @@ async def remaining_minutes(uid: int) -> float:
     return max(0.0, limit - used)
 
 
+@serialized
 async def add_usage(uid: int, minutes: float):
-    u = await get_user(uid)
-    used = u["minutes_used"] if u["period"] == _month() else 0.0
-    await _db.execute("UPDATE users SET minutes_used=?, period=? WHERE id=?",
-                      (used + minutes, _month(), uid))
+    await get_user(uid)
+    await _add_usage(uid, minutes)
     await _db.commit()
 
 
+async def _add_usage(uid: int, minutes: float):
+    if not math.isfinite(minutes) or minutes < 0:
+        raise ValueError("Usage must be a finite nonnegative number")
+    month = _month()
+    await _db.execute(
+        "UPDATE users SET minutes_used=(CASE WHEN period=? THEN minutes_used ELSE 0 END)+?, "
+        "period=? WHERE id=?", (month, minutes, month, uid))
+
+
+@serialized
 async def set_plan(uid: int, plan: str, months: int = 1):
     await get_user(uid)
     until = int(time.time()) + months * 30 * 86400
@@ -193,22 +237,29 @@ async def set_plan(uid: int, plan: str, months: int = 1):
     await _db.commit()
 
 
+@serialized
 async def set_glossary(uid: int, text: str):
     await _db.execute("UPDATE users SET glossary=? WHERE id=?", (text, uid))
     await _db.commit()
 
 
-async def save_job(uid: int, file_name: str, transcript: dict) -> int:
+@serialized
+async def save_job(uid: int, file_name: str, transcript: dict,
+                   minutes: float = 0) -> int:
+    """Save the result and its usage in the same transaction."""
+    await get_user(uid)
     cur = await _db.execute(
         "INSERT INTO jobs(user_id, file_name, transcript, created) VALUES(?,?,?,?)",
         (uid, file_name, json.dumps(transcript, ensure_ascii=False), int(time.time())),
     )
+    await _add_usage(uid, minutes)
     await _db.commit()
     return cur.lastrowid
 
 
-async def get_job(job_id: int) -> dict | None:
-    cur = await _db.execute("SELECT * FROM jobs WHERE id=?", (job_id,))
+@serialized
+async def get_job(job_id: int, uid: int) -> dict | None:
+    cur = await _db.execute("SELECT * FROM jobs WHERE id=? AND user_id=?", (job_id, uid))
     row = await cur.fetchone()
     if not row:
         return None
@@ -217,6 +268,7 @@ async def get_job(job_id: int) -> dict | None:
 
 
 # --- промокоды ---
+@serialized
 async def create_promo(code: str, plan: str, months: int, uses: int):
     await _db.execute(
         "INSERT OR REPLACE INTO promo(code, plan, months, uses_left, created) VALUES(?,?,?,?,?)",
@@ -225,6 +277,7 @@ async def create_promo(code: str, plan: str, months: int, uses: int):
     await _db.commit()
 
 
+@serialized
 async def redeem_promo(uid: int, code: str) -> tuple[bool, str]:
     cur = await _db.execute("SELECT * FROM promo WHERE code=?", (code,))
     p = await cur.fetchone()
@@ -247,34 +300,37 @@ async def redeem_promo(uid: int, code: str) -> tuple[bool, str]:
 
 
 # --- платежи ---
+@serialized
 async def payment_exists(charge_id: str) -> bool:
     cur = await _db.execute("SELECT 1 FROM payments WHERE charge_id=?", (charge_id,))
     return await cur.fetchone() is not None
 
 
-async def add_payment(uid: int, plan: str, amount: int, currency: str,
+@serialized
+async def apply_payment(uid: int, plan: str, amount: int, currency: str,
                       charge_id: str, provider_charge_id: str | None,
                       email: str | None, is_test: bool,
-                      phone: str | None = None, name: str | None = None) -> int | None:
-    """Записывает платёж. Возвращает id, либо None если такой charge_id уже был."""
-    try:
-        cur = await _db.execute(
-            """INSERT INTO payments(user_id, plan, amount, currency, charge_id,
-                                    provider_charge_id, email, phone, name, is_test, created)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (uid, plan, amount, currency, charge_id, provider_charge_id,
-             email, phone, name, int(is_test), int(time.time())),
-        )
-        if email:
-            await _db.execute("UPDATE users SET email=? WHERE id=?", (email, uid))
-        await _db.commit()
-        return cur.lastrowid
-    except sqlite3.IntegrityError:
+                      phone: str | None = None, name: str | None = None) -> tuple[int, int] | None:
+    """Record charge and grant a month atomically; duplicates return None.
+
+    Monthly usage is independent of subscription renewal and is not reset here.
+    The serialized wrapper rolls back both changes on error/cancellation.
+    """
+    if plan not in config.PRICES:
+        raise ValueError("Unknown paid plan")
+    await get_user(uid)
+    await _db.execute("BEGIN IMMEDIATE")
+    cur = await _db.execute(
+        """INSERT INTO payments(user_id, plan, amount, currency, charge_id,
+                                provider_charge_id, email, phone, name, is_test, created)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(charge_id) DO NOTHING""",
+        (uid, plan, amount, currency, charge_id, provider_charge_id,
+         email, phone, name, int(is_test), int(time.time())),
+    )
+    if not cur.rowcount:
+        await _db.rollback()
         return None
-
-
-async def extend_plan(uid: int, plan: str, months: int = 1) -> int:
-    """Продлевает подписку после оплаты. Возвращает plan_until (0 = бессрочно)."""
+    pid = cur.lastrowid
     u = await get_user(uid)
     now = int(time.time())
 
@@ -282,28 +338,37 @@ async def extend_plan(uid: int, plan: str, months: int = 1) -> int:
         until = 0            # бессрочный тариф с промокода не понижаем
     else:
         base = u["plan_until"] if (u["plan"] == plan and u["plan_until"] > now) else now
-        until = base + months * config.SUB_DAYS * 86400
+        until = base + config.SUB_DAYS * 86400
 
     await _db.execute(
-        "UPDATE users SET plan=?, plan_until=?, minutes_used=0, period=? WHERE id=?",
-        (plan, until, _month(), uid),
+        "UPDATE users SET plan=?, plan_until=?, email=COALESCE(?, email) WHERE id=?",
+        (plan, until, email, uid),
     )
     await _db.commit()
-    return until
+    return pid, until
 
 
+@serialized
 async def set_receipt(payment_id: int, url: str) -> aiosqlite.Row | None:
     cur = await _db.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
     row = await cur.fetchone()
     if not row:
         return None
     await _db.execute(
-        "UPDATE payments SET receipt_url=?, receipt_sent=1 WHERE id=?", (url, payment_id)
+        "UPDATE payments SET receipt_url=?, receipt_sent=0 WHERE id=?", (url, payment_id)
     )
     await _db.commit()
     return row
 
 
+@serialized
+async def mark_receipt_sent(payment_id: int, url: str):
+    await _db.execute("UPDATE payments SET receipt_sent=1 WHERE id=? AND receipt_url=?",
+                      (payment_id, url))
+    await _db.commit()
+
+
+@serialized
 async def pending_receipts() -> list[aiosqlite.Row]:
     cur = await _db.execute(
         "SELECT * FROM payments WHERE receipt_sent=0 AND is_test=0 ORDER BY id"
@@ -311,6 +376,7 @@ async def pending_receipts() -> list[aiosqlite.Row]:
     return await cur.fetchall()
 
 
+@serialized
 async def recent_jobs(limit: int = 5) -> list:
     """Последние расшифровки для прогона промптов без повторной транскрибации."""
     cur = await _db.execute(
@@ -330,12 +396,14 @@ async def recent_jobs(limit: int = 5) -> list:
 
 
 # --- настройки ---
+@serialized
 async def get_setting(key: str, default: str | None = None) -> str | None:
     cur = await _db.execute("SELECT value FROM settings WHERE key=?", (key,))
     row = await cur.fetchone()
     return row["value"] if row else default
 
 
+@serialized
 async def set_setting(key: str, value: str | None):
     if value is None:
         await _db.execute("DELETE FROM settings WHERE key=?", (key,))
@@ -347,22 +415,26 @@ async def set_setting(key: str, value: str | None):
 
 
 # --- статистика, рассылка, выгрузка ---
+@serialized
 async def all_user_ids() -> list[int]:
     cur = await _db.execute("SELECT id FROM users WHERE COALESCE(blocked,0)=0 ORDER BY id")
     return [r["id"] for r in await cur.fetchall()]
 
 
+@serialized
 async def mark_blocked(uid: int):
     await _db.execute("UPDATE users SET blocked=1 WHERE id=?", (uid,))
     await _db.commit()
 
 
+@serialized
 async def count_users() -> int:
     cur = await _db.execute("SELECT COUNT(*) FROM users")
     row = await cur.fetchone()
     return row[0] if row else 0
 
 
+@serialized
 async def stats() -> dict:
     async def one(sql: str, *args):
         cur = await _db.execute(sql, args)
@@ -407,6 +479,7 @@ def _rows_to_csv(rows, headers: list[str]) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
+@serialized
 async def export_users_csv() -> bytes:
     cur = await _db.execute(
         """SELECT id, username, first_name, last_name, lang_code, is_premium, source,
@@ -422,6 +495,7 @@ async def export_users_csv() -> bytes:
     ])
 
 
+@serialized
 async def export_payments_csv() -> bytes:
     cur = await _db.execute(
         """SELECT p.id, p.user_id, u.username, p.plan, p.amount, p.currency,
@@ -437,6 +511,7 @@ async def export_payments_csv() -> bytes:
     ])
 
 
+@serialized
 async def export_events_csv(limit: int = 20000) -> bytes:
     cur = await _db.execute(
         """SELECT e.id, e.user_id, u.username, e.kind, e.detail, e.created
