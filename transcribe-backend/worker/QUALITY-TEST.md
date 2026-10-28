@@ -124,6 +124,19 @@ Conda-образа имел неподдерживаемые платформе�
 проверка зависимостей сохранена.
 Оба образа проверяют импорт ASR и диаризации ещё при сборке, до платного задания.
 
+Baseline на `a88c725` успешно собран и обработал четыре записи: executionTime
+36.911 с, alignment/diarization `ok` для всех. Пословная разметка дала 3/6/2/1
+меток спикеров; прежний экспорт тех же данных — 2/2/2/1. Это не ручной эталон и
+не доказательство улучшения качества.
+
+Первый Community-1 запуск завершился `FAILED` (56.279 с выполнения): CTranslate2
+не нашёл `libcudnn_cnn.so.9` и процесс вышел с кодом 134 до получения результата.
+В тестовом Dockerfile добавлены пути wheel-библиотек cuBLAS/cuDNN в
+`LD_LIBRARY_PATH` и проверка `ctypes.CDLL` с нужным символом при сборке.
+Обычный импорт torch/WhisperX эту проблему не выявляет. Проверка исправленного
+образа на GPU пока не подтверждена. Исходный журнал не удалять и не обнулять бюджет.
+Источник настройки загрузчика: [faster-whisper GPU requirements](https://github.com/SYSTRAN/faster-whisper#gpu).
+
 Источники совместимости: [WhisperX 3.8.6](https://github.com/m-bain/whisperX/blob/v3.8.6/pyproject.toml),
 [pyannote.audio 4.0.3](https://github.com/pyannote/pyannote-audio/blob/4.0.3/pyproject.toml),
 [Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
