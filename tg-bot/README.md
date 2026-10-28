@@ -46,18 +46,20 @@ py -3.12 -m venv C:\Users\Projects\Transcipt-git\.venv
 
 ## Настройка отдельного тестового экземпляра
 
-Использовать отдельного бота, отдельную БД и хранилище. Не запускать второй polling
-с токеном работающего PoslovnicaBot. Скопировать `.env.example` в `.env` и заполнить
-переменные; реальные значения не коммитить. Запуск из папки `tg-bot` после настройки:
+Использовать отдельную точку входа `integration_test.py`, явный `.env.integration-test`
+по [integration.env.example](integration.env.example) и отдельные бот/R2/RunPod.
+Она разрешает один личный Telegram ID и одно выбранное сообщение до 60 с/10 МиБ,
+отключает платежи, ссылки и AI-кнопки, ведёт журнал отправок и пытается отменить
+облачное задание при ошибке/таймауте. БД и результаты находятся в `.test-runtime/`.
+Инструкция запуска, ограничения бюджета и результаты двух прежних живых проверок:
+[INTEGRATION-TEST.md](INTEGRATION-TEST.md). Новый runner проверен офлайн.
 
-```powershell
-Set-Location 'C:\Users\Projects\Transcipt-git\tg-bot'
-& 'C:\Users\Projects\Transcipt-git\.venv\Scripts\python.exe' 'C:\Users\Projects\Transcipt-git\tg-bot\bot.py'
-```
-
+В обычном запуске `bot.py` используются `.env`/переменные окружения;
 `DB_PATH` по умолчанию относителен рабочей папке. `LOCAL_BOT_API` пустой — облачный
 Telegram API; иначе задаётся адрес своего Bot API. `TG_TIMEOUT` — таймаут запросов
-локального Bot API в секундах. В production запуском управляет служба `PoslovnicaBot`.
+Bot API в секундах. В production запуском управляет служба `PoslovnicaBot`.
+Не запускать второй polling с рабочим токеном. Перед push учитывать также
+автосборку **тестового** endpoint, привязанного к ветке PR.
 
 ## Администрирование
 

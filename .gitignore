@@ -16,6 +16,7 @@ tg-bot/tmp/
 __pycache__/
 *.pyc
 .venv/
+.test-runtime/
 venv/
 
 # прочее

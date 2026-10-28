@@ -1348,6 +1348,8 @@ ADMIN_COMMANDS = USER_COMMANDS + [
 
 
 async def main():
+    if config.TEST_SETTINGS is not None:
+        raise SystemExit("Use integration_test.py for the restricted test mode")
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан в .env")
     await db.init()

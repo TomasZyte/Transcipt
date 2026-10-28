@@ -2,7 +2,16 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# The dedicated test entry point selects an explicit file before importing the bot.
+# Do not merge inherited production values or implicitly discover another .env.
+TEST_SETTINGS = None
+if "POSLOVNICA_TEST_CONFIG" in os.environ:
+    from pathlib import Path
+    from integration_config import TestSettings
+    TEST_SETTINGS = TestSettings.load(Path(os.environ["POSLOVNICA_TEST_CONFIG"]))
+    os.environ.update(TEST_SETTINGS.environment())
+else:
+    load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 

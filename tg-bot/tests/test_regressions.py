@@ -25,7 +25,7 @@ with patch("dotenv.load_dotenv"), patch.dict(os.environ, {
     "S3_ENDPOINT": "http://127.0.0.1:9", "S3_ACCESS_KEY": "offline",
     "S3_SECRET_KEY": "offline", "ADMINS": "", "PROVIDER_TOKEN": "offline:TEST:token",
     "LOCAL_BOT_API": "", "AWS_EC2_METADATA_DISABLED": "true", "STARS_ENABLED": "1",
-}):
+}, clear=True):
     import bot
     import config
     import db
