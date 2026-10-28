@@ -12,15 +12,22 @@
 import os
 import re
 import json
+import inspect
 import subprocess
 import tempfile
+import time
 from typing import Optional
+from transcript_segments import build_segments
 
 # --- Конфигурация через окружение -------------------------------------------
 DEVICE = os.getenv("DEVICE", "cuda")               # cuda | cpu
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16") # float16 (GPU) | int8 (экономно/CPU)
 ASR_MODEL = os.getenv("ASR_MODEL", "large-v3")
 HF_TOKEN = os.getenv("HF_TOKEN")                   # токен HuggingFace для pyannote-диаризации
+DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+# Only enable on the isolated endpoint. Keeps aligned words for a reproducible
+# before/after comparison and avoids loading the LLM during ASR/diarization tests.
+QUALITY_BENCHMARK = os.getenv("QUALITY_BENCHMARK", "0") == "1"
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 
 # LLM для саммари — локальная модель в этом же воркере (self-hosted, без внешних вызовов).
@@ -63,7 +70,11 @@ def _load_diarizer():
             from whisperx.diarize import DiarizationPipeline
         except ImportError:
             from whisperx import DiarizationPipeline
-        _diarize_pipeline = DiarizationPipeline(use_auth_token=HF_TOKEN, device=DEVICE)
+        # WhisperX 3.8 uses token; production 3.3 uses use_auth_token. Do not
+        # retry a failed model load with a different model or swallowed error.
+        token_key = "token" if "token" in inspect.signature(DiarizationPipeline).parameters else "use_auth_token"
+        _diarize_pipeline = DiarizationPipeline(
+            model_name=DIARIZATION_MODEL, device=DEVICE, **{token_key: HF_TOKEN})
     return _diarize_pipeline
 
 
@@ -728,10 +739,11 @@ def analyze(text: str, task: str = "summary", target_lang: str = "",
 def process(media_path: str, options: Optional[dict] = None,
             file_name: str = "Запись", file_type: str = "audio") -> dict:
     import whisperx
+    started = time.perf_counter()
     options = options or {}
     lang_opt = options.get("language", "auto")
     enable_diar = options.get("enableDiarization", True)
-    speaker_count = options.get("speakerCount")  # ТЕПЕРЬ используется (в текущем коде терялось)
+    speaker_count = options.get("speakerCount")
     glossary = options.get("customGlossary", "")
 
     audio_path = extract_audio(media_path)
@@ -742,16 +754,26 @@ def process(media_path: str, options: Optional[dict] = None,
     lang = None if lang_opt in (None, "", "auto") else lang_opt
     result = asr.transcribe(audio, batch_size=BATCH_SIZE, language=lang)
     language = result.get("language", "ru")
+    if QUALITY_BENCHMARK:
+        # This module is copied only into the isolated test images.
+        from quality_diagnostics import snapshot_asr, snapshot_diarization
+        asr_snapshot = snapshot_asr(result.get("segments", []))
+        diarization_snapshot = {"status": "not_run", "segments": None}
 
+    processing = {"asrModel": ASR_MODEL, "diarizationModel": DIARIZATION_MODEL,
+                  "alignment": "ok", "diarization": "disabled"}
     # 2) Выравнивание -> точные пословные тайм-коды
     try:
         align_model, metadata = _load_align(language)
         result = whisperx.align(result["segments"], align_model, metadata, audio,
                                 DEVICE, return_char_alignments=False)
     except Exception as e:
+        processing["alignment"] = "failed"
         print(f"[align] пропущено ({e})")
 
     # 3) Диаризация ПО ВСЕМУ ФАЙЛУ -> спикеры консистентны от начала до конца
+    if enable_diar:
+        processing["diarization"] = "missing_token" if not HF_TOKEN else "failed"
     if enable_diar and HF_TOKEN:
         try:
             diarizer = _load_diarizer()
@@ -760,33 +782,22 @@ def process(media_path: str, options: Optional[dict] = None,
                 diar_kwargs["min_speakers"] = speaker_count
                 diar_kwargs["max_speakers"] = speaker_count
             diarize_segments = diarizer(audio, **diar_kwargs)
+            if QUALITY_BENCHMARK:
+                diarization_snapshot = snapshot_diarization(diarize_segments)
             result = whisperx.assign_word_speakers(diarize_segments, result)
+            processing["diarization"] = "ok"
         except Exception as e:
             print(f"[diarize] пропущено ({e})")
 
-    # 4) Глобальная перенумерация SPEAKER_00 -> "Спикер 1" (единая по всему файлу)
-    speaker_map, segments = {}, []
-    for i, seg in enumerate(result.get("segments", []), 1):
-        raw_spk = seg.get("speaker", "SPEAKER_00")
-        if raw_spk not in speaker_map:
-            speaker_map[raw_spk] = f"Спикер {len(speaker_map) + 1}"
-        start = float(seg.get("start", 0.0))
-        end = float(seg.get("end", start))
-        segments.append({
-            "id": f"seg-{i}",
-            "startSec": round(start, 2),
-            "endSec": round(end, 2),
-            "timestamp": _fmt_timestamp(start),
-            "speaker": speaker_map[raw_spk],
-            "text": (seg.get("text") or "").strip(),
-        })
+    # 4) Смена говорящего внутри предложения не теряется при экспорте.
+    segments, processing["speakerTurns"] = build_segments(result.get("segments", []))
 
     raw_text = "\n\n".join(f"{s['speaker']}: {s['text']}" for s in segments)
     duration = segments[-1]["endSec"] if segments else 0
-    word_count = len(raw_text.split())
+    word_count = sum(len(s["text"].split()) for s in segments)
 
     # 5) Саммари
-    summary = summarize(raw_text, glossary)
+    summary = {} if QUALITY_BENCHMARK else summarize(raw_text, glossary)
 
     # чистка временного WAV
     try:
@@ -794,7 +805,7 @@ def process(media_path: str, options: Optional[dict] = None,
     except OSError:
         pass
 
-    return {
+    output = {
         "languageDetected": language,
         "durationEstimateSec": duration,
         "rawText": raw_text,
@@ -804,4 +815,17 @@ def process(media_path: str, options: Optional[dict] = None,
         "wordCount": word_count,
         "fileName": file_name,
         "fileType": file_type,
+        "processing": processing,
     }
+    if QUALITY_BENCHMARK:
+        processing["summary"] = "disabled_for_benchmark"
+        processing["pipelineSeconds"] = round(time.perf_counter() - started, 3)
+        # Do not store signed media URLs or credentials in benchmark artifacts.
+        aligned = result.get("segments", [])
+        coarse = [{k: s[k] for k in ("start", "end", "speaker", "text") if k in s}
+                  for s in aligned]
+        output["benchmark"] = {"baselineSegments": build_segments(coarse)[0],
+                               "alignedSegments": aligned,
+                               "asrSegments": asr_snapshot,
+                               "diarizationTimeline": diarization_snapshot}
+    return output
