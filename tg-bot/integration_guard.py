@@ -125,8 +125,11 @@ class OneJobRunner:
         finally:
             save_json(self.path, self.state)
 
+    def request_body(self, payload):
+        return guarded_payload(payload, self.settings)
+
     async def __call__(self, payload, timeout_s=3600):
-        body = guarded_payload(payload, self.settings)
+        body = self.request_body(payload)
         self.check_available()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.state.update(status="reserved", submitted_at=time.time())

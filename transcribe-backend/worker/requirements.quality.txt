@@ -1,0 +1,11 @@
+# Candidate stack only. Production requirements.txt remains unchanged.
+whisperx==3.8.6
+pyannote.audio==4.0.3
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+torchcodec==0.7.0
+transformers==4.57.6
+faster-whisper==1.2.1
+ctranslate2==4.5.0
+runpod==1.7.7

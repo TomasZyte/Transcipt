@@ -1,0 +1,14 @@
+# TEST ONLY: the current production dependency stack with benchmark diagnostics.
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+    QUALITY_BENCHMARK=1 QUALITY_PROFILE=baseline ASR_MODEL=large-v3 BATCH_SIZE=8 \
+    DIARIZATION_MODEL=pyannote/speaker-diarization-3.1
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --target=/opt/cudnn8 nvidia-cudnn-cu12==8.9.7.29
+ENV LD_LIBRARY_PATH=/opt/cudnn8/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt && pip check
+COPY pipeline.py transcript_segments.py quality_batch_handler.py ./
+CMD ["python", "quality_batch_handler.py"]

@@ -19,6 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # холодном старте. Если вернёмся к этой идее — вшивать только Whisper и модель
 # выравнивания (~4,5 ГБ), без LLM.
 
-COPY pipeline.py handler.py local_server.py ./
+COPY pipeline.py handler.py local_server.py transcript_segments.py ./
 
 CMD ["python", "handler.py"]
