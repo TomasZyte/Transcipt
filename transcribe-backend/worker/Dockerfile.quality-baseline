@@ -9,6 +9,11 @@ RUN pip install --no-cache-dir --target=/opt/cudnn8 nvidia-cudnn-cu12==8.9.7.29
 ENV LD_LIBRARY_PATH=/opt/cudnn8/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt && pip check
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --force-reinstall --no-deps ninja==1.11.1.1 \
+    && pip check
 COPY pipeline.py transcript_segments.py quality_batch_handler.py ./
+# Replace the base image's incompatible Ninja wheel metadata above, then check
+# actual ASR/diarization imports before spending GPU time on a benchmark job.
+RUN python -c "import torch, whisperx; from whisperx.asr import load_model; from whisperx.diarize import DiarizationPipeline; import pipeline; assert pipeline.QUALITY_BENCHMARK"
 CMD ["python", "quality_batch_handler.py"]
