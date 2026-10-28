@@ -1,19 +1,31 @@
 # секреты и данные — никогда в репозиторий
 .env
 *.env
+.env.*
+!.env.example
 tg-bot/bot.db
 tg-bot/bot.db-journal
 tg-bot/logs/
 tg-bot/backups/
 *.db
+*.db-*
 *.log
+tg-bot/tmp/
 
 # питон
 __pycache__/
 *.pyc
 .venv/
+.test-runtime/
 venv/
 
 # прочее
 *.bak
 Thumbs.db
+.DS_Store
+
+# веб-версия и локальные результаты сборки
+node_modules/
+build/
+dist/
+coverage/
