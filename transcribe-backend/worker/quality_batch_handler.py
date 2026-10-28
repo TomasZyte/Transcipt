@@ -34,6 +34,10 @@ def validate_request(inp, storage_host):
         if not isinstance(sample_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", sample_id) or sample_id in ids:
             raise ValueError("Invalid or duplicate sample ID")
         ids.add(sample_id)
+        if "speaker_count" in sample:
+            count = sample["speaker_count"]
+            if type(count) is not int or not 1 <= count <= 10:
+                raise ValueError("speaker_count must be an integer from 1 to 10")
         if not isinstance(sample.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", sample["sha256"]):
             raise ValueError("Missing sample checksum")
         url = urlsplit(sample.get("media_url", ""))
@@ -82,9 +86,13 @@ def handler(job):
             from pipeline import process
             results = []
             for sample, path, duration in downloaded:
-                output = process(str(path), {"language": "auto", "enableDiarization": True},
+                options = {"language": "auto", "enableDiarization": True}
+                if "speaker_count" in sample:
+                    options["speakerCount"] = sample["speaker_count"]
+                output = process(str(path), options,
                                  file_name=path.name, file_type="audio")
                 results.append({"id": sample["id"], "sha256": sample["sha256"],
+                                "requestedSpeakerCount": sample.get("speaker_count"),
                                 "durationSeconds": round(duration, 3), "output": output})
             return {"profile": job["input"]["profile"], "samples": results,
                     "elapsedSeconds": round(time.perf_counter() - started, 3),

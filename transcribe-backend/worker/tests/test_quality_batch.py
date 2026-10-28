@@ -5,7 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+from types import SimpleNamespace
 import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -20,6 +21,41 @@ def payload():
 
 
 class BatchValidation(unittest.TestCase):
+    def test_speaker_count_validation_precedes_io(self):
+        for count in (None, True, False, 0, -1, 11, 4.0, "4", [], {}):
+            with self.subTest(count=count):
+                p = payload()
+                p["samples"][0]["speaker_count"] = count
+                with self.assertRaises(ValueError):
+                    batch.validate_request(p, HOST)
+                with patch.dict(batch.os.environ, {"QUALITY_BENCHMARK": "1", "QUALITY_PROFILE": "baseline", "QUALITY_R2_HOST": HOST}), \
+                        patch.object(batch, "fetch_sample") as fetch:
+                    self.assertIn("error", batch.handler({"input": p}))
+                    fetch.assert_not_called()
+
+    def test_count_is_forwarded_per_sample_and_auto_stays_auto(self):
+        p = payload()
+        p["samples"][0]["speaker_count"] = 4
+        auto = deepcopy(p["samples"][0])
+        auto["id"] = "sound_auto"
+        del auto["speaker_count"]
+        p["samples"].append(auto)
+        process = Mock(return_value={"segments": []})
+        with patch.dict(batch.os.environ, {"QUALITY_BENCHMARK": "1", "QUALITY_PROFILE": "baseline", "QUALITY_R2_HOST": HOST}), \
+                patch.dict(sys.modules, {"pipeline": SimpleNamespace(process=process)}), \
+                patch.object(batch, "fetch_sample", return_value=1), patch.object(batch, "version", return_value="test"):
+            result = batch.handler({"input": p})
+        self.assertNotIn("error", result)
+        self.assertEqual(process.call_args_list[0].args[1], {"language": "auto", "enableDiarization": True, "speakerCount": 4})
+        self.assertEqual(process.call_args_list[1].args[1], {"language": "auto", "enableDiarization": True})
+        self.assertEqual([s["requestedSpeakerCount"] for s in result["samples"]], [4, None])
+
+    def test_speaker_count_boundaries(self):
+        for count in (1, 4, 10):
+            p = payload()
+            p["samples"][0]["speaker_count"] = count
+            self.assertEqual(batch.validate_request(p, HOST)[0]["speaker_count"], count)
+
     def test_accept_only_explicit_test_bucket(self):
         self.assertEqual(len(batch.validate_request(payload(), HOST)), 1)
         for url in ("https://" + HOST + "/transcribe/quality/a.wav?key=x",
