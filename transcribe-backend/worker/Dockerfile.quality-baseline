@@ -12,7 +12,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir --upgrade --no-deps ninja==1.11.1.2 \
     && pip check
-COPY pipeline.py transcript_segments.py quality_batch_handler.py ./
+COPY pipeline.py transcript_segments.py quality_batch_handler.py quality_diagnostics.py ./
 # Replace the base image's incompatible Ninja wheel metadata above, then check
 # actual ASR/diarization imports before spending GPU time on a benchmark job.
 RUN python -c "import torch, whisperx; from whisperx.asr import load_model; from whisperx.diarize import DiarizationPipeline; import pipeline; assert pipeline.QUALITY_BENCHMARK"

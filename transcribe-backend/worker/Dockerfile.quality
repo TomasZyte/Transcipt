@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.quality.txt && pip check
 # automatically searched, even when importing torch succeeds without a GPU.
 ENV LD_LIBRARY_PATH=/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
 RUN python -c "import ctypes; ctypes.CDLL('libcublas.so.12'); ctypes.CDLL('libcudnn_cnn.so.9').cudnnCreateConvolutionDescriptor"
-COPY pipeline.py transcript_segments.py quality_batch_handler.py ./
+COPY pipeline.py transcript_segments.py quality_batch_handler.py quality_diagnostics.py ./
 # Import checks only: builds do not download gated models or submit GPU jobs.
 RUN python -c "import torch, whisperx; from whisperx.asr import load_model; from whisperx.diarize import DiarizationPipeline; import pipeline; assert torch.version.cuda is not None; assert pipeline.QUALITY_BENCHMARK"
 CMD ["python", "quality_batch_handler.py"]

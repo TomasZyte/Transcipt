@@ -754,6 +754,11 @@ def process(media_path: str, options: Optional[dict] = None,
     lang = None if lang_opt in (None, "", "auto") else lang_opt
     result = asr.transcribe(audio, batch_size=BATCH_SIZE, language=lang)
     language = result.get("language", "ru")
+    if QUALITY_BENCHMARK:
+        # This module is copied only into the isolated test images.
+        from quality_diagnostics import snapshot_asr, snapshot_diarization
+        asr_snapshot = snapshot_asr(result.get("segments", []))
+        diarization_snapshot = {"status": "not_run", "segments": None}
 
     processing = {"asrModel": ASR_MODEL, "diarizationModel": DIARIZATION_MODEL,
                   "alignment": "ok", "diarization": "disabled"}
@@ -777,6 +782,8 @@ def process(media_path: str, options: Optional[dict] = None,
                 diar_kwargs["min_speakers"] = speaker_count
                 diar_kwargs["max_speakers"] = speaker_count
             diarize_segments = diarizer(audio, **diar_kwargs)
+            if QUALITY_BENCHMARK:
+                diarization_snapshot = snapshot_diarization(diarize_segments)
             result = whisperx.assign_word_speakers(diarize_segments, result)
             processing["diarization"] = "ok"
         except Exception as e:
@@ -818,5 +825,7 @@ def process(media_path: str, options: Optional[dict] = None,
         coarse = [{k: s[k] for k in ("start", "end", "speaker", "text") if k in s}
                   for s in aligned]
         output["benchmark"] = {"baselineSegments": build_segments(coarse)[0],
-                               "alignedSegments": aligned}
+                               "alignedSegments": aligned,
+                               "asrSegments": asr_snapshot,
+                               "diarizationTimeline": diarization_snapshot}
     return output

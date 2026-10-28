@@ -159,7 +159,34 @@ class PipelineOutput(unittest.TestCase):
         self.assertEqual(len(out["benchmark"]["baselineSegments"]), 1)
         self.assertEqual(len(out["segments"]), 2)
         self.assertEqual(out["benchmark"]["alignedSegments"][0], source)
+        self.assertEqual(out["benchmark"]["asrSegments"], [
+            {key: source[key] for key in ("start", "end", "text")}])
+        self.assertEqual(out["benchmark"]["diarizationTimeline"]["status"], "unavailable")
         self.assertEqual(out["processing"]["summary"], "disabled_for_benchmark")
+
+    def test_benchmark_snapshots_precede_mutating_alignment_and_assignment(self):
+        source = example()
+        original = deepcopy(source)
+        rows = [{"start": 0, "end": 4, "speaker": "raw"}]
+        frame = SimpleNamespace(to_dict=lambda orient: rows)
+        def align(*args, **kwargs):
+            source["text"] = "Текст после выравнивания"
+            source["words"] = []
+            return {"segments": [source]}
+        def assign(*args):
+            rows[0]["speaker"] = "mutated"
+            return {"segments": [source]}
+        asr = SimpleNamespace(transcribe=lambda *a, **k: {"segments": [source], "language": "ru"})
+        wx = SimpleNamespace(load_audio=lambda p: "audio", align=align, assign_word_speakers=assign)
+        with patch.object(pipeline, "QUALITY_BENCHMARK", True), patch.dict(sys.modules, {"whisperx": wx}), \
+                patch.object(pipeline, "extract_audio", return_value="offline.wav"), \
+                patch.object(pipeline, "_load_asr", return_value=asr), \
+                patch.object(pipeline, "_load_align", return_value=(None, None)), \
+                patch.object(pipeline, "_load_diarizer", return_value=lambda *a, **k: frame), \
+                patch.object(pipeline, "HF_TOKEN", "test"), patch.object(pipeline.os, "remove"):
+            out = pipeline.process("offline.mp4")
+        self.assertEqual(out["benchmark"]["asrSegments"][0]["text"], original["text"])
+        self.assertEqual(out["benchmark"]["diarizationTimeline"]["segments"][0]["speaker"], "raw")
 
     def test_production_does_not_emit_private_alignment_dump(self):
         with patch.object(pipeline, "QUALITY_BENCHMARK", False):
