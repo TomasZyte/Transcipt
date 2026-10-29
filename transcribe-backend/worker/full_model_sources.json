@@ -1,0 +1,54 @@
+{
+  "alignment": {
+    "repository": "jonatasgrosman/wav2vec2-large-xlsr-53-russian",
+    "revision": "2329100508896c6d9b157019803ab5601e6f3406",
+    "files": {
+      "config.json": {
+        "size": 1782,
+        "git_blob_sha1": "4e6ea0c631be11c63e48c6cb3c7fb9c20525735a"
+      },
+      "preprocessor_config.json": {
+        "size": 262,
+        "git_blob_sha1": "bb3285bc209d674e3f88646bdfd327bfe43b60da"
+      },
+      "pytorch_model.bin": {
+        "size": 1262093719,
+        "sha256": "d1cdb1a7921de7d363f967a9b0101a713602e109dba62b6f3f9ae2e0b2df0c1c"
+      },
+      "special_tokens_map.json": {
+        "size": 85,
+        "git_blob_sha1": "25bc39604f72700b3b8e10bd69bb2f227157edd1"
+      },
+      "vocab.json": {
+        "size": 387,
+        "git_blob_sha1": "7605a21c3ef6a87c6bcf8a5e86fc0b27605b082e"
+      }
+    }
+  },
+  "diarization": {
+    "repository": "pyannote/speaker-diarization-community-1",
+    "revision": "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
+    "files": {
+      "config.yaml": {
+        "size": 444,
+        "git_blob_sha1": "4022db43960736338378fdb6b5a85cfdae198910"
+      },
+      "embedding/pytorch_model.bin": {
+        "size": 26646242,
+        "sha256": "6f10ff60898a1d185fa22e1d11e0bfa8a92efec811f11bca48cb8cafebefd929"
+      },
+      "plda/plda.npz": {
+        "size": 133852,
+        "sha256": "9b77bcd840692710dd3496f62ecfeed8d8e5f002fd991b785079b244eab7d255"
+      },
+      "plda/xvec_transform.npz": {
+        "size": 134376,
+        "sha256": "325f1ce8e48f7e55e9c8aa47e05d2766b7c48c4b25b8de8dd751e7a4cc5fbe8f"
+      },
+      "segmentation/pytorch_model.bin": {
+        "size": 5906507,
+        "sha256": "7ad24338d844fb95985486eb1a464e32d229f6d7a03c9abe60f978bacf3f816e"
+      }
+    }
+  }
+}

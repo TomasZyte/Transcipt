@@ -1,0 +1,41 @@
+name: Full test pipeline build check
+on:
+  push:
+    branches: [codex/full-pipeline-test]
+    paths:
+      - .github/workflows/full-pipeline-build-check.yml
+      - transcribe-backend/worker/**
+permissions:
+  contents: read
+concurrency:
+  group: full-pipeline-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    if: github.repository == 'TomasZyte/Transcipt' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Offline worker tests
+        run: python3 -m unittest discover -s transcribe-backend/worker/tests -v
+      - name: Free disposable runner space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Build full test pipeline on CPU
+        run: docker build --progress=plain -f transcribe-backend/worker/Dockerfile.asr-full -t poslovnica-full:check transcribe-backend/worker
+      - name: Verify public models offline
+        run: |
+          docker run --rm --network=none --entrypoint python poslovnica-full:check -c '
+          import os
+          from asr_comparison import verify_assets, config_for
+          from prepare_full_assets import verify_bundle, verify_nltk
+          assert os.environ["FULL_PIPELINE_TEST"] == "0"
+          verify_assets("/opt/asr/model-lock.json", config_for("wx_auto"))
+          verify_bundle("/opt/full/alignment", "alignment")
+          verify_nltk("/opt/full")
+          import full_pipeline_handler
+          print("FULL_TEST_BUNDLE_VERIFIED; no GPU or gated model access")
+          '
+          docker image inspect poslovnica-full:check --format 'IMAGE_ID={{.Id}} SIZE_BYTES={{.Size}}'
