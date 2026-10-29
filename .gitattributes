@@ -1,0 +1,2 @@
+# This manifest's byte hash is compared across Windows clients and Linux images.
+transcribe-backend/worker/full_model_sources.json text eol=lf
