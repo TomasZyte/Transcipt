@@ -122,7 +122,18 @@ class ShortTurnRunner(FullRunner):
             response = await client.get(self.url + '/health', headers=self.headers)
             response.raise_for_status()
             health = response.json()
-        if health != self.expected_health:
+        workers = health.get('workers', {})
+        expected_workers = self.expected_health['workers']
+        # RunPod keeps one dormant ready worker even with Active workers=0.
+        # It can also recreate that worker after manual termination. Require
+        # unchanged job history and no running/initializing/unhealthy workers;
+        # a single idle, ready worker is within the verified Max workers=1 cap.
+        if (set(health) != set(self.expected_health)
+                or health.get('jobs') != self.expected_health['jobs']
+                or set(workers) != set(expected_workers)
+                or any(type(v) is not int for v in workers.values())
+                or (workers.get('idle'), workers.get('ready')) not in ((0, 0), (1, 1))
+                or any(v != expected_workers[k] for k, v in workers.items() if k not in ('idle', 'ready'))):
             raise RuntimeError('Cloud state changed since reconciliation; inspect before another attempt')
 
     def payload(self, url):

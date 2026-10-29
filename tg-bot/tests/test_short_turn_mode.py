@@ -36,7 +36,8 @@ def fixture(root):
         s.save_json(path, d)
     health = {'endpoint': s.previous.ENDPOINT, 'observed_at_utc': now.isoformat(),
         'health': {'jobs': {'completed': 12, 'failed': 1, 'retried': 2, 'inProgress': 0, 'inQueue': 0},
-                   'workers': {'idle': 0, 'running': 0, 'initializing': 0}}}
+                   'workers': {'idle': 0, 'ready': 0, 'running': 0, 'initializing': 0,
+                               'throttled': 0, 'unhealthy': 0}}}
     shutdown = {'observed_at_utc': (now - timedelta(hours=2)).isoformat(), 'health': deepcopy(health['health'])}
     bill = {'endpoint': s.previous.ENDPOINT, 'observed_at_utc': now.isoformat(),
         'period_ui': 'окт. 1 30', 'period_timezone': 'UTC', 'group': 'Serverless / Endpoint',
@@ -136,6 +137,34 @@ class ShortTurnClientTests(unittest.TestCase):
 
 
 class ShortTurnSubmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_dormant_worker_does_not_change_job_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = fixture(Path(folder).resolve())
+            client = AsyncMock(); client.__aenter__.return_value = client
+            runner = s.ShortTurnRunner(settings, client_factory=Mock(return_value=client))
+            for count in (0, 1):
+                health = deepcopy(runner.expected_health)
+                health['workers'].update(idle=count, ready=count)
+                client.get.return_value = response(health)
+                await runner.health()
+            client.post.assert_not_called()
+
+    async def test_busy_unhealthy_or_extra_workers_stop_before_upload(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = fixture(Path(folder).resolve())
+            client = AsyncMock(); client.__aenter__.return_value = client
+            runner = s.ShortTurnRunner(settings, client_factory=Mock(return_value=client))
+            changes = [{'running': 1}, {'initializing': 1}, {'unhealthy': 1}, {'throttled': 1},
+                       {'idle': 2, 'ready': 2}, {'idle': 0, 'ready': 1},
+                       {'idle': True, 'ready': True}, {'new_worker_state': 1}]
+            for change in changes:
+                with self.subTest(change=change):
+                    health = deepcopy(runner.expected_health); health['workers'].update(change)
+                    client.get.return_value = response(health)
+                    with patch.object(s.previous, 'upload_sound2', side_effect=AssertionError('upload')):
+                        with self.assertRaises(RuntimeError): await runner.execute()
+            client.post.assert_not_called()
+
     async def test_exactly_one_attempt_is_journaled_before_post_and_cannot_repeat(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve(); settings = fixture(root)
