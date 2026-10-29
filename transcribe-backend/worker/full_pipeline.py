@@ -90,16 +90,22 @@ def format_output(raw, aligned, timeline, mode, duration):
     return output
 
 
-def execute(manifest, output_path):
+def execute(manifest, output_path, profile=PROFILE):
     if os.getenv('FULL_PIPELINE_TEST') != '1' or os.getenv('FULL_PIPELINE_IMAGE') != '1':
         raise ValueError('Explicit isolated full-pipeline image and flag required')
+    import context_pipeline
+    if profile not in (PROFILE,context_pipeline.PROFILE):
+        raise ValueError('Unknown isolated comparison profile')
+    contextual = profile == context_pipeline.PROFILE
+    if contextual:
+        context_pipeline.require_context()
     output_path = Path(output_path)
     if output_path.exists():
         raise ValueError('Do not overwrite an earlier attempt')
     rows = read_json(manifest)['samples']
     validate_audio_rows(rows)
-    state = {'profile':PROFILE,'status':'started','samples':[], 'phase':'verify_assets',
-             'modes':MODES, 'source_manifest_sha256':digest(SOURCES)}
+    state = {'profile':profile,'status':'started','samples':[], 'phase':'verify_assets',
+             'modes':context_pipeline.MODES if contextual else MODES, 'source_manifest_sha256':digest(SOURCES)}
     started = time.perf_counter()
     try:
         assets = verify_assets('/opt/asr/model-lock.json',config_for('wx_auto'))
@@ -138,6 +144,17 @@ def execute(manifest, output_path):
                 sample = {'id':row['id'],'sha256':row['sha256'],
                     'durationSeconds':row['duration_seconds'],'outputs':{}}
                 state['samples'].append(sample)
+                if contextual:
+                    state['phase'] = row['id'] + ':context_comparison'
+                    context_pipeline.execute_sample(audio,model=model,output_sink=sample['outputs'],
+                        align=lambda segments,chunk: whisperx.align(segments,align_model,metadata,chunk,
+                            'cuda',return_char_alignments=False),
+                        assign=lambda aligned: whisperx.assign_word_speakers(diar_frame.copy(deep=True),aligned),
+                        timeline=timeline,duration=row['duration_seconds'])
+                    context_pipeline.validate_sample(sample['outputs'],len(audio),row['duration_seconds'])
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    continue
                 for mode, chunk_size in MODES.items():
                     state['phase'] = row['id'] + ':' + mode + ':asr'
                     phase_start = time.perf_counter()
@@ -168,8 +185,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--profile',default=PROFILE)
     args = parser.parse_args()
-    execute(args.manifest,args.output)
+    execute(args.manifest,args.output,args.profile)
 
 
 if __name__ == '__main__':

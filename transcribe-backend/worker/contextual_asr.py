@@ -129,12 +129,13 @@ def reconcile(evidence, frame_count):
             char_end = len(segment['text']) if last==all_words[-1] else all_words[last['word_index']+1]['char_start']
             candidate.append({'start':first['start'],'end':last['end'],
                               'text':segment['text'][char_start:char_end].strip(),
+                              'words':[{k:w[k] for k in ('word','start','end','score')} for w in selected],
                               'source_window':win['index']})
     result['candidate_segments'] = candidate
     return result
 
 
-def decode_with_context(audio, *, transcribe, align, language):
+def decode_with_context(audio, *, transcribe, align, language, evidence=None):
     """Callbacks use the same already-verified models as the full-file control.
 
     language must come from that control's detection, not human reference text.
@@ -146,14 +147,20 @@ def decode_with_context(audio, *, transcribe, align, language):
         raise ValueError('This experiment requires the control to detect Russian')
     if len(getattr(audio,'shape',(len(audio),))) != 1:
         raise ValueError('Expected mono audio')
-    windows, evidence = plan_windows(len(audio)), []
+    windows = plan_windows(len(audio))
+    if evidence is None:
+        evidence = []
+    elif not isinstance(evidence,list) or evidence:
+        raise ValueError('Evidence sink must start empty')
     for window in windows:
         chunk = audio[window['read_start_frame']:window['read_end_frame']]
         raw = deepcopy(transcribe(chunk,language=language,batch_size=8,task='transcribe',chunk_size=30))
         if raw.get('language') != language or not isinstance(raw.get('segments'),list):
             raise ValueError('Unexpected ASR result')
+        item = {'window':deepcopy(window),'raw':raw}
+        evidence.append(item)
         aligned = deepcopy(align(deepcopy(raw['segments']),chunk))
-        evidence.append({'window':deepcopy(window),'raw':raw,'aligned':aligned})
+        item['aligned'] = aligned
     return {'mode':MODE,'language':language,'source_frames':len(audio),'sample_rate':RATE,
             'read_frames':sum(w['read_end_frame']-w['read_start_frame'] for w in windows),
             'window_evidence':evidence,'reconciliation':reconcile(evidence,len(audio)),

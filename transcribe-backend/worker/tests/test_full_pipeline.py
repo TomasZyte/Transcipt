@@ -14,6 +14,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import full_pipeline as f
 import full_pipeline_handler as h
 import prepare_full_assets as assets
+import context_pipeline as context
 
 HOST = '0'*32 + '.r2.cloudflarestorage.com'
 
@@ -136,17 +137,21 @@ class FullContracts(unittest.TestCase):
     def test_full_batch_uses_same_weights_two_chunk_sizes_and_one_global_diarization(self):
         self._fake_run()
 
+    def test_context_profile_uses_fixed_language_and_one_global_diarization(self):
+        self._fake_run(contextual=True)
+
     def test_failed_stage_keeps_partial_evidence_and_does_not_continue(self):
         self._fake_run(fail_align=True)
 
-    def _fake_run(self,fail_align=False):
+    def _fake_run(self,fail_align=False,contextual=False):
         manifest, output = self.root/'manifest.json',self.root/'result.json'
         f.write_new(manifest,{'samples':self.rows})
         model = Mock()
+        model.detect_language.return_value = 'ru'
         model.transcribe.side_effect = lambda *args,**kwargs: {'language':'ru','segments':f.snapshot_asr(segments())}
         wx = types.ModuleType('whisperx')
         wx.load_model = Mock(return_value=model)
-        wx.load_audio = Mock(return_value='audio-array')
+        wx.load_audio = Mock(return_value=[0.]*16000 if contextual else 'audio-array')
         wx.load_align_model = Mock(return_value=(None,{}))
         wx.align = Mock(side_effect=ValueError('fixture') if fail_align else None,
                         return_value={'segments':segments()})
@@ -159,12 +164,12 @@ class FullContracts(unittest.TestCase):
         torch = types.ModuleType('torch')
         torch.manual_seed = Mock()
         torch.cuda = types.SimpleNamespace(empty_cache=Mock())
-        with patch.dict(os.environ,self.env),patch.dict(sys.modules,{'whisperx':wx,
+        with patch.dict(os.environ,{**self.env,'CONTEXT_ASR_TEST':'1'}),patch.dict(sys.modules,{'whisperx':wx,
              'whisperx.vads.pyannote':vad,'whisperx.diarize':diar,'torch':torch}), \
              patch.object(f,'verify_assets',return_value={'root':'asr','vad_path':'vad'}), \
              patch.object(f,'verify_bundle',return_value={}),patch.object(f,'verify_nltk',return_value='lock'), \
              patch.object(f,'prepare_diarization',return_value={}):
-            result = f.execute(manifest,output)
+            result = f.execute(manifest,output,context.PROFILE if contextual else f.PROFILE)
         self.assertEqual(result['status'],'failed' if fail_align else 'completed')
         self.assertTrue(output.is_file())
         if fail_align:
@@ -172,8 +177,12 @@ class FullContracts(unittest.TestCase):
             self.assertEqual(model.transcribe.call_count,1)
         else:
             self.assertEqual(wx.load_model.call_count,1)
-            self.assertEqual([c.kwargs['chunk_size'] for c in model.transcribe.call_args_list],[30,12]*4)
-            self.assertTrue(all(c.kwargs['language'] is None for c in model.transcribe.call_args_list))
+            self.assertEqual([c.kwargs['chunk_size'] for c in model.transcribe.call_args_list],[30]*8 if contextual else [30,12]*4)
+            self.assertTrue(all(c.kwargs['language'] == ('ru' if contextual else None) for c in model.transcribe.call_args_list))
+            if contextual:
+                self.assertEqual(model.detect_language.call_count,4)
+                self.assertEqual(result['modes'],context.MODES)
+                self.assertTrue(all(s['outputs'][context.MODE]['quality_validated'] is False for s in result['samples']))
             self.assertEqual(diar_model.call_count,4)
             self.assertTrue(all(c.kwargs == {} for c in diar_model.call_args_list))
             self.assertEqual(wx.align.call_count,8)

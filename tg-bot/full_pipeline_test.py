@@ -38,21 +38,25 @@ def history_files(runtime):
 
 class FullRunner(OneJobRunner):
     health = AsrRunner.health
+    campaign_name, output_profile, modes = CAMPAIGN, PROFILE, MODES
+    validated_key = 'full_pipeline_validated'
+    history_files = staticmethod(history_files)
+    additional_preflight = {}
 
     def __init__(self, settings, **kwargs):
         if settings.endpoint != ENDPOINT or settings.bucket != BUCKET:
             raise ValueError('Dedicated test resources required')
         self.base_settings = settings
-        root = settings.runtime/CAMPAIGN
+        root = settings.runtime/self.campaign_name
         if root.resolve() != root or (root/'jobs').resolve() != root/'jobs':
             raise ValueError('Runtime must not redirect through links')
         self.campaign_path = root/'campaign.json'
         c = self.campaign = read_json(self.campaign_path)
         self.campaign_sha = digest(self.campaign_path)
         commit = c.get('commit', '')
-        if (c.get('schema') != 1 or c.get('campaign') != CAMPAIGN
+        if (c.get('schema') != 1 or c.get('campaign') != self.campaign_name
                 or c.get('endpoint') != ENDPOINT or c.get('bucket') != BUCKET
-                or c.get('modes') != MODES or len(commit) != 40
+                or c.get('modes') != self.modes or len(commit) != 40
                 or any(ch not in '0123456789abcdef' for ch in commit)
                 or c.get('image') != IMAGE_PREFIX + commit[:9]
                 or c.get('source_manifest_sha256') != digest(SOURCES)):
@@ -62,7 +66,7 @@ class FullRunner(OneJobRunner):
                 or prior < settings.prior_spend or prior + RESERVE_USD > budget):
             raise ValueError('The reserved batch exceeds the cumulative budget')
         isolated = replace(settings, runtime=root, max_jobs=1, budget=budget, prior_spend=prior)
-        super().__init__(isolated, CAMPAIGN, timeout_s=CLIENT_SECONDS, **kwargs)
+        super().__init__(isolated, self.campaign_name, timeout_s=CLIENT_SECONDS, **kwargs)
         manifest = Path(c['manifest'])
         if digest(manifest) != c['manifest_sha256']:
             raise ValueError('Audio manifest changed')
@@ -71,14 +75,15 @@ class FullRunner(OneJobRunner):
         validate_audio_rows(self.rows)
         if {r['id']:r['sha256'] for r in self.rows} != c['audio_sha256']:
             raise ValueError('Audio identity changed')
-        self.state.update(campaign_sha256=self.campaign_sha, full_pipeline_validated=False,
+        self.state.update(campaign_sha256=self.campaign_sha,
                           audio_sha256=c['audio_sha256'], source_manifest_sha256=digest(SOURCES))
+        self.state[self.validated_key] = False
         self.validate_history()
 
     def validate_history(self):
         if digest(self.campaign_path) != self.campaign_sha:
             raise ValueError('Campaign changed after preparation')
-        actual, expected = history_files(self.base_settings.runtime), self.campaign.get('history_sha256')
+        actual, expected = self.history_files(self.base_settings.runtime), self.campaign.get('history_sha256')
         if not expected or set(actual) != set(expected):
             raise ValueError('History changed; reconcile billing first')
         for name,path in actual.items():
@@ -104,6 +109,7 @@ class FullRunner(OneJobRunner):
                     'execution_timeout_seconds':300, 'idle_timeout_seconds':5,
                     'flashboot':False, 'full_pipeline_enabled':True, 'asr_comparison_enabled':False,
                     'campaign_sha256':self.campaign_sha}
+        expected.update(self.additional_preflight)
         if any(type(p.get(k)) is not type(v) or p[k] != v for k,v in expected.items()):
             raise ValueError('Preflight does not confirm the bounded test setup')
         if not 0 < money(p['gpu_rate_usd_per_hour']) <= Decimal('0.75'):
@@ -117,7 +123,7 @@ class FullRunner(OneJobRunner):
     def payload(self, urls):
         if len(urls) != 4:
             raise ValueError('Exactly four full files required')
-        return {'profile':PROFILE, 'samples':[{'id':r['id'],'sha256':r['sha256'],'media_url':url}
+        return {'profile':self.output_profile, 'samples':[{'id':r['id'],'sha256':r['sha256'],'media_url':url}
                                              for r,url in zip(self.rows,urls)]}
 
     def request_body(self, payload):
@@ -127,10 +133,9 @@ class FullRunner(OneJobRunner):
         validate_request({'profile':'community','samples':payload['samples']},self.settings.storage_host)
         return {'input':payload,'policy':{'executionTimeout':EXECUTION_MS,'ttl':TTL_MS}}
 
-    def validate_output(self, result):
-        c = self.campaign
-        if (result.get('profile') != PROFILE or result.get('status') != 'completed'
-                or result.get('modes') != MODES or result.get('source_manifest_sha256') != digest(SOURCES)):
+    def validate_provenance(self, result):
+        if (result.get('profile') != self.output_profile or result.get('status') != 'completed'
+                or result.get('modes') != self.modes or result.get('source_manifest_sha256') != digest(SOURCES)):
             raise ValueError('Incomplete or mismatching full-pipeline result')
         sources, runtime = read_json(SOURCES), result.get('runtime',{})
         assets = runtime.get('asr',{})
@@ -141,6 +146,10 @@ class FullRunner(OneJobRunner):
             if (runtime.get(kind,{}).get('revision') != sources[kind]['revision']
                     or runtime[kind].get('repository') != sources[kind]['repository']):
                 raise ValueError('Unexpected model revision')
+        return assets
+
+    def validate_output(self, result):
+        assets = self.validate_provenance(result)
         samples = result.get('samples',[])
         if len(samples) != 4:
             raise ValueError('Expected eight outputs for four files')
@@ -171,7 +180,7 @@ class FullRunner(OneJobRunner):
             self.check_available()
             self.preflight()
             await self.health()
-            urls = await asyncio.to_thread(upload_samples,self.settings,self.rows)
+            urls = await asyncio.to_thread(upload_samples,self.settings,self.rows,campaign=self.campaign_name)
             self.check_available()
             self.preflight()
             await self.health()
@@ -183,7 +192,7 @@ class FullRunner(OneJobRunner):
         raise RuntimeError('Use execute() to enforce preflight and the shared process lock')
 
 
-def upload_samples(settings, rows):
+def upload_samples(settings, rows, *, campaign=CAMPAIGN):
     import boto3
     from botocore.config import Config
     validate_audio_rows(rows)
@@ -196,7 +205,7 @@ def upload_samples(settings, rows):
         data = Path(row['path']).read_bytes()
         if hashlib.sha256(data).hexdigest() != row['sha256']:
             raise ValueError('Audio changed before upload')
-        key = 'quality/'+CAMPAIGN+'/'+row['sha256']+'/'+row['id']+'.wav'
+        key = 'quality/'+campaign+'/'+row['sha256']+'/'+row['id']+'.wav'
         s3.put_object(Bucket=BUCKET,Key=key,Body=data,ContentType='audio/wav',
                       ContentMD5=base64.b64encode(hashlib.md5(data).digest()).decode('ascii'))
         stream = s3.get_object(Bucket=BUCKET,Key=key)['Body']

@@ -7,6 +7,7 @@ import tempfile
 
 from asr_comparison import read_json, write_new
 from full_pipeline import PROFILE, IDS, MODES, validate_audio_rows
+import context_pipeline
 from quality_batch_handler import validate_request as validate_r2, fetch_sample
 
 CHILD_TIMEOUT = 270
@@ -15,8 +16,10 @@ CHILD_TIMEOUT = 270
 def validate(inp):
     if os.getenv('FULL_PIPELINE_IMAGE') != '1' or os.getenv('FULL_PIPELINE_TEST') != '1':
         raise ValueError('Isolated full-pipeline test mode is required')
-    if not isinstance(inp,dict) or set(inp) != {'profile','samples'} or inp['profile'] != PROFILE:
+    if not isinstance(inp,dict) or set(inp) != {'profile','samples'} or inp['profile'] not in (PROFILE,context_pipeline.PROFILE):
         raise ValueError('Only the fixed full pipeline profile is supported')
+    if inp['profile'] == context_pipeline.PROFILE:
+        context_pipeline.require_context()
     samples = inp['samples']
     if not isinstance(samples,list) or len(samples) != 4 or any(
             not isinstance(s,dict) or set(s) != {'id','sha256','media_url'} for s in samples):
@@ -31,6 +34,7 @@ def handler(job):
     stage = 'validate'
     try:
         samples = validate(job.get('input'))
+        profile = job['input']['profile']
         with tempfile.TemporaryDirectory(prefix='full-pipeline-') as directory:
             root = Path(directory)
             rows = []
@@ -44,12 +48,13 @@ def handler(job):
             write_new(manifest,{'samples':rows})
             stage = 'child'
             child = subprocess.run([sys.executable,str(Path(__file__).with_name('full_pipeline.py')),
-                '--manifest',str(manifest),'--output',str(output)],timeout=CHILD_TIMEOUT,
+                '--manifest',str(manifest),'--output',str(output),'--profile',profile],timeout=CHILD_TIMEOUT,
                 stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
             if child.returncode != 0 or not output.is_file():
                 raise RuntimeError('Full pipeline child did not produce evidence')
             result = read_json(output)
-            if result.get('profile') != PROFILE or result.get('modes') != MODES:
+            expected_modes = context_pipeline.MODES if profile == context_pipeline.PROFILE else MODES
+            if result.get('profile') != profile or result.get('modes') != expected_modes:
                 raise ValueError('Unexpected full pipeline child output')
             return result
     except Exception as exc:

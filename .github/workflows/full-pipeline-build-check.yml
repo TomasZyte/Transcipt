@@ -32,10 +32,11 @@ jobs:
           from asr_comparison import verify_assets, config_for
           from prepare_full_assets import verify_bundle, verify_nltk
           assert os.environ["FULL_PIPELINE_TEST"] == "0"
+          assert os.environ["CONTEXT_ASR_TEST"] == "0"
           verify_assets("/opt/asr/model-lock.json", config_for("wx_auto"))
           verify_bundle("/opt/full/alignment", "alignment")
           verify_nltk("/opt/full")
-          import full_pipeline_handler
+          import full_pipeline_handler, context_pipeline
           print("FULL_TEST_BUNDLE_VERIFIED; no GPU or gated model access")
           '
           docker image inspect poslovnica-full:check --format 'IMAGE_ID={{.Id}} SIZE_BYTES={{.Size}}'
