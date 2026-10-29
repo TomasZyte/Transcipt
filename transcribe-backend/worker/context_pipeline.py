@@ -2,7 +2,7 @@
 from copy import deepcopy
 import os
 
-from contextual_asr import decode_with_context, reconcile, plan_windows, RATE, MODE
+from contextual_asr import decode_with_context, reconcile, plan_windows, model_evidence, RATE, MODE
 from full_pipeline import format_output, finite
 
 PROFILE = 'context-pipeline-v1'
@@ -16,7 +16,7 @@ def require_context():
 
 
 def global_segments(segments, offset):
-    result = deepcopy(segments)
+    result = model_evidence(segments)
     for segment in result:
         for item in [segment]+segment.get('words',[]):
             for key in ('start','end'):
@@ -35,7 +35,7 @@ def export(raw, aligned, timeline, mode, duration):
 
 
 def assigned_segments(segments, assign):
-    return assign({'segments':deepcopy(segments)})
+    return model_evidence(assign({'segments':deepcopy(segments)}))
 
 
 def execute_sample(audio, *, model, align, assign, timeline, duration, output_sink=None):
@@ -47,10 +47,10 @@ def execute_sample(audio, *, model, align, assign, timeline, duration, output_si
     language = model.detect_language(audio)
     if language != 'ru':
         raise ValueError('This experiment requires detected Russian')
-    raw = deepcopy(model.transcribe(audio,language=language,batch_size=8,task='transcribe',chunk_size=30))
+    raw = model_evidence(model.transcribe(audio,language=language,batch_size=8,task='transcribe',chunk_size=30))
     if raw.get('language') != language:
         raise ValueError('Unexpected control language')
-    aligned = align(deepcopy(raw['segments']),audio)
+    aligned = model_evidence(align(deepcopy(raw['segments']),audio))
     control = export(raw,assigned_segments(aligned['segments'],assign),timeline,CONTROL,duration)
     outputs[CONTROL] = control
     context = outputs[MODE] = {'status':'started','window_evidence':[]}

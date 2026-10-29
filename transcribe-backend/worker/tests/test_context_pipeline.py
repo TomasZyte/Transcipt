@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 import os
 from pathlib import Path
 import sys
@@ -14,7 +15,11 @@ ENV={'FULL_PIPELINE_IMAGE':'1','FULL_PIPELINE_TEST':'1','CONTEXT_ASR_TEST':'1'}
 TIMELINE={'status':'ok','segments':[{'start':0.,'end':24.,'speaker':'same_full_file_label'}]}
 
 
-def compare(*,disagree=False,fail_align=False,sink=None):
+class ModelFloat(float):
+    """JSON-serializable scalar subtype returned by an aligner."""
+
+
+def compare(*,disagree=False,fail_align=False,sink=None,scalar=float):
     audio=list(range(24*RATE))
     model=Mock()
     model.detect_language.return_value='ru'
@@ -32,6 +37,9 @@ def compare(*,disagree=False,fail_align=False,sink=None):
         offset=chunk[0]/RATE
         segments[0]['words']=[{'word':'Да,','start':11.5-offset,'end':11.8-offset,'score':.8},
             {'word':'другое!' if disagree and offset else 'да!', 'start':12.1-offset,'end':12.4-offset,'score':.9}]
+        for item in [segments[0]]+segments[0]['words']:
+            for key in ('start','end','score'):
+                if key in item: item[key]=scalar(item[key])
         return {'segments':segments}
     def assign(aligned):
         for segment in aligned['segments']:
@@ -44,6 +52,30 @@ def compare(*,disagree=False,fail_align=False,sink=None):
 
 
 class ContextComparison(unittest.TestCase):
+    def test_model_scalar_types_keep_global_times_and_replay_after_json(self):
+        result,_=compare(scalar=ModelFloat)
+        c.validate_sample(result,24*RATE,24.)
+        saved=json.loads(json.dumps(result,allow_nan=False))
+        c.validate_sample(saved,24*RATE,24.)
+        self.assertEqual(saved,result)
+        ctx=result[c.MODE]
+        self.assertEqual(ctx['status'],'candidate_unvalidated')
+        self.assertEqual(ctx['window_evidence'][1]['aligned']['segments'][0]['words'][0]['start'],1.5)
+        word=ctx['window_outputs'][1]['output']['benchmark']['alignedSegments'][0]['words'][0]
+        self.assertEqual(word['start'],11.5)
+        self.assertIs(type(word['start']),float)
+        self.assertEqual(' '.join(s['text'] for s in ctx['candidate']['segments']),'Да, да!')
+
+    def test_model_scalar_normalization_does_not_accept_invalid_timestamps(self):
+        from contextual_asr import model_evidence, reconcile, plan_windows
+        for start in (True,ModelFloat('nan'),ModelFloat('inf'),ModelFloat(-1)):
+            item={'window':plan_windows(RATE)[0], 'raw':{'segments':[{'text':'x'}]},
+                  'aligned':{'segments':[{'text':'x','words':[{'word':'x','start':start,'end':.5}]}]}}
+            result=reconcile([model_evidence(item)],RATE)
+            self.assertEqual(result['status'],'review_required')
+            self.assertIsNone(result['candidate_segments'])
+        with self.assertRaises(ValueError): model_evidence({'start':object()})
+
     def test_handler_requires_extra_flag_and_rejects_hints_before_any_work(self):
         host='0'*32+'.r2.cloudflarestorage.com'
         payload={'profile':c.PROFILE,'samples':[{'id':'sound'+str(i),'sha256':'a'*64,

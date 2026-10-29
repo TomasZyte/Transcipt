@@ -6,6 +6,7 @@ This is a prepared hypothesis, not a validated quality improvement.
 """
 from copy import deepcopy
 import math
+from numbers import Integral, Real
 import os
 import re
 
@@ -14,6 +15,26 @@ CORE = 12 * RATE
 PADDING = 2 * RATE
 MIN_TAIL = 4 * RATE
 MODE = 'context12_pad2'
+
+
+def model_evidence(value):
+    """Freeze model scalars as JSON-native values before timing decisions.
+
+    Aligners can return float subclasses (for example numpy.float64). JSON
+    erases that distinction, so strict timing checks must see the same values
+    in the worker and when the saved evidence is replayed by the client.
+    """
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        return float(value)
+    if isinstance(value, list):
+        return [model_evidence(item) for item in value]
+    if isinstance(value, dict) and all(type(key) is str for key in value):
+        return {key:model_evidence(item) for key,item in value.items()}
+    raise ValueError('Unsupported model evidence type')
 
 
 def plan_windows(frame_count):
@@ -139,7 +160,7 @@ def decode_with_context(audio, *, transcribe, align, language, evidence=None):
     """Callbacks use the same already-verified models as the full-file control.
 
     language must come from that control's detection, not human reference text.
-    No GPU/model imports happen here. A separate paid runner is not connected yet.
+    No GPU/model imports happen here; the isolated context runner owns submission.
     """
     if os.getenv('CONTEXT_ASR_TEST') != '1':
         raise ValueError('Explicit CONTEXT_ASR_TEST=1 required')
@@ -154,12 +175,12 @@ def decode_with_context(audio, *, transcribe, align, language, evidence=None):
         raise ValueError('Evidence sink must start empty')
     for window in windows:
         chunk = audio[window['read_start_frame']:window['read_end_frame']]
-        raw = deepcopy(transcribe(chunk,language=language,batch_size=8,task='transcribe',chunk_size=30))
+        raw = model_evidence(transcribe(chunk,language=language,batch_size=8,task='transcribe',chunk_size=30))
         if raw.get('language') != language or not isinstance(raw.get('segments'),list):
             raise ValueError('Unexpected ASR result')
         item = {'window':deepcopy(window),'raw':raw}
         evidence.append(item)
-        aligned = deepcopy(align(deepcopy(raw['segments']),chunk))
+        aligned = model_evidence(align(deepcopy(raw['segments']),chunk))
         item['aligned'] = aligned
     return {'mode':MODE,'language':language,'source_frames':len(audio),'sample_rate':RATE,
             'read_frames':sum(w['read_end_frame']-w['read_start_frame'] for w in windows),
