@@ -31,6 +31,9 @@ def validate(inp):
 
 
 def handler(job):
+    if isinstance(job.get('input'),dict) and job['input'].get('profile') == 'speaker-children-v1':
+        import speaker_comparison
+        return speaker_comparison.handler(job)
     stage = 'validate'
     try:
         samples = validate(job.get('input'))
