@@ -1,0 +1,14 @@
+# Separate TEST image recipe; no WhisperX/diarization/LLM environment changes.
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+    ASR_COMPARISON_IMAGE=1 ASR_COMPARISON_TEST=0 ASR_IMAGE_MODEL=v3_rnnt \
+    HF_HUB_DISABLE_TELEMETRY=1
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.asr-gigaam.txt ./
+RUN pip install --no-cache-dir -r requirements.asr-gigaam.txt && pip check
+COPY asr_comparison.py asr_comparison_handler.py prepare_asr_assets.py asr_model_sources.json quality_batch_handler.py ./
+RUN python prepare_asr_assets.py --model v3_rnnt --destination /opt/asr --download
+RUN python -c "import gigaam; import asr_comparison_handler"
+CMD ["python", "asr_comparison_handler.py"]

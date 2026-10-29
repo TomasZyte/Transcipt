@@ -1,0 +1,63 @@
+name: ASR image build check
+
+# Isolated CPU build branch; never runs on main or the RunPod-linked quality branch.
+on:
+  push:
+    branches: [codex/asr-build-check]
+    paths:
+      - .github/workflows/asr-build-check.yml
+      - transcribe-backend/worker/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: asr-build-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'TomasZyte/Transcipt' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [whisper, gigaam]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Offline unit tests
+        run: python3 -m unittest discover -s transcribe-backend/worker/tests -v
+      - name: Free space on disposable hosted runner
+        run: |
+          # These are preinstalled SDKs in this disposable GitHub VM, not user files.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+      - name: Build pinned model image on CPU
+        env:
+          FAMILY: ${{ matrix.family }}
+        run: |
+          docker build --progress=plain --file "transcribe-backend/worker/Dockerfile.asr-${FAMILY}" \
+            --tag "poslovnica-asr-${FAMILY}:check" transcribe-backend/worker
+      - name: Validate baked bundle without network or GPU
+        env:
+          FAMILY: ${{ matrix.family }}
+        run: |
+          docker run --rm --network=none --entrypoint python "poslovnica-asr-${FAMILY}:check" -c '
+          import os
+          from asr_comparison import config_for, read_json, verify_assets
+          model = os.environ["ASR_IMAGE_MODEL"]
+          variant = "gigaam_v3" if model == "v3_rnnt" else "wx_auto"
+          lock = "/opt/asr/model-lock.json"
+          verify_assets(lock, config_for(variant))
+          assert os.environ["ASR_COMPARISON_TEST"] == "0"
+          print("BUNDLE_VERIFIED", model, read_json(lock)["revision"])
+          '
+      - name: Record image identity
+        env:
+          FAMILY: ${{ matrix.family }}
+        run: |
+          docker image inspect "poslovnica-asr-${FAMILY}:check" --format 'IMAGE_ID={{.Id}} SIZE_BYTES={{.Size}}'
+          echo "CPU build and offline bundle verification passed for ${FAMILY}. No inference, registry upload, or deployment." >> "$GITHUB_STEP_SUMMARY"

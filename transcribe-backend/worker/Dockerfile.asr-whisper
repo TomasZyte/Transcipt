@@ -1,0 +1,17 @@
+# Separate TEST image recipe. Building downloads public weights; never select for production.
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+ARG ASR_MODEL=large-v3
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+    ASR_COMPARISON_IMAGE=1 ASR_COMPARISON_TEST=0 ASR_IMAGE_MODEL=${ASR_MODEL} \
+    HF_HUB_DISABLE_TELEMETRY=1 PYANNOTE_METRICS_ENABLED=0
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.quality.txt ./
+RUN pip install --no-cache-dir -r requirements.quality.txt && pip check
+ENV LD_LIBRARY_PATH=/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+RUN python -c "import ctypes; ctypes.CDLL('libcublas.so.12'); ctypes.CDLL('libcudnn_cnn.so.9').cudnnCreateConvolutionDescriptor"
+COPY asr_comparison.py asr_comparison_handler.py prepare_asr_assets.py asr_model_sources.json quality_batch_handler.py ./
+RUN python prepare_asr_assets.py --model ${ASR_MODEL} --destination /opt/asr --download
+RUN python -c "import whisperx; from faster_whisper import WhisperModel; import asr_comparison_handler"
+CMD ["python", "asr_comparison_handler.py"]

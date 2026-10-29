@@ -1,0 +1,32 @@
+{
+  "checked_date": "2026-10-29",
+  "large-v3": {
+    "repository": "Systran/faster-whisper-large-v3",
+    "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+    "files": {
+      "config.json": {"size": 2394, "git_blob_sha1": "75336feae814999bae6ccccdecf177639ffc6f9d"},
+      "model.bin": {"size": 3087284237, "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"},
+      "preprocessor_config.json": {"size": 340, "git_blob_sha1": "931c77a740890c46365c7ae0c9d350ba3cca908f"},
+      "tokenizer.json": {"size": 2480617, "git_blob_sha1": "3a5e2ba63acdcac9a19ba56cf9bd27f185bfff61"},
+      "vocabulary.json": {"size": 1068114, "git_blob_sha1": "0adcd01e7c237205d593b707e66dd5d7bc785d2d"}
+    }
+  },
+  "large-v2": {
+    "repository": "Systran/faster-whisper-large-v2",
+    "revision": "f0fe81560cb8b68660e564f55dd99207059c092e",
+    "files": {
+      "config.json": {"size": 2796, "git_blob_sha1": "346bb8684801a61c15ce82bcb80c29a63c2d1f94"},
+      "model.bin": {"size": 3086912962, "sha256": "bf2a9746382e1aa7ffff6b3a0d137ed9edbd9670c3b87e5d35f5e85e70d0333a"},
+      "tokenizer.json": {"size": 2203239, "git_blob_sha1": "7818adb6de9fa3064d3ff81226fdd675be1f6344"},
+      "vocabulary.txt": {"size": 459861, "git_blob_sha1": "c9074644d9d1205686f16d411564729461324b75"}
+    }
+  },
+  "v3_rnnt": {
+    "repository": "https://github.com/salute-developers/GigaAM",
+    "revision": "7447938d791c4f3e643386ee22c33777004293a5",
+    "url": "https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/v3_rnnt.ckpt",
+    "upstream_md5": "0fd2c9a1ff66abd8d32a3a07f7592815",
+    "max_download_bytes": 2147483648,
+    "note": "Code revision is fixed. Upstream publishes an MD5 for this checkpoint; record SHA256 of verified bytes in the built model lock."
+  }
+}
