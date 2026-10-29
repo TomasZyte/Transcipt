@@ -159,7 +159,7 @@ class SpeakerRunner(FullRunner):
             return result
 
 
-def upload_sound2(runner):
+def upload_sound2(runner, *, campaign=CAMPAIGN):
     import boto3
     from botocore.config import Config
     s, c = runner.settings, runner.campaign
@@ -171,7 +171,9 @@ def upload_sound2(runner):
         aws_access_key_id=s.secrets['S3_ACCESS_KEY'],aws_secret_access_key=s.secrets['S3_SECRET_KEY'],
         region_name='auto',config=Config(signature_version='s3v4',connect_timeout=5,read_timeout=20,
                                        retries={'total_max_attempts':1}))
-    key='quality/'+CAMPAIGN+'/'+c['audio_sha256']+'/sound2.wav'
+    if campaign not in (CAMPAIGN, 'speaker-short-turns-v1'):
+        raise ValueError('Unexpected sound2 campaign')
+    key='quality/'+campaign+'/'+c['audio_sha256']+'/sound2.wav'
     client.put_object(Bucket=BUCKET,Key=key,Body=data,ContentType='audio/wav',
         ContentMD5=base64.b64encode(hashlib.md5(data).digest()).decode('ascii'))
     stream = client.get_object(Bucket=BUCKET,Key=key)['Body']

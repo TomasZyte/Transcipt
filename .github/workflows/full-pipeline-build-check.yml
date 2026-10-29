@@ -34,10 +34,12 @@ jobs:
           assert os.environ["FULL_PIPELINE_TEST"] == "0"
           assert os.environ["CONTEXT_ASR_TEST"] == "0"
           assert os.environ["SPEAKER_COMPARISON_TEST"] == "0"
+          assert os.environ["SHORT_TURN_COMPARISON_TEST"] == "0"
           verify_assets("/opt/asr/model-lock.json", config_for("wx_auto"))
           verify_bundle("/opt/full/alignment", "alignment")
           verify_nltk("/opt/full")
-          import full_pipeline_handler, context_pipeline, speaker_comparison
+          import full_pipeline_handler, context_pipeline, speaker_comparison, short_turn_comparison
+          short_turn_comparison.verify_filter_api()
           print("FULL_TEST_BUNDLE_VERIFIED; no GPU or gated model access")
           '
           docker image inspect poslovnica-full:check --format 'IMAGE_ID={{.Id}} SIZE_BYTES={{.Size}}'
