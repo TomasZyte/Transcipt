@@ -25,7 +25,7 @@ def phrase_matches(words, phrase):
 
 
 def evaluate(result, references):
-    if (result.get('status') != 'completed' or result.get('profile') != 'release-candidate-v1'
+    if (result.get('status') != 'completed' or result.get('profile') not in ('release-candidate-v1', 'timed-turns-v1', 'acoustic-turns-v1')
             or references.get('purpose') != 'evaluation_only'):
         raise ValueError('Completed candidate and independent evaluation references required')
     samples = result['samples']
@@ -49,14 +49,21 @@ def evaluate(result, references):
                 timed = [match for match in matches if all(
                     type(w.get('start')) in (float, int) and type(w.get('end')) in (float, int)
                     and low <= w['start'] < w['end'] <= high for w in match)]
-                forbidden = set(phrase.get('forbidden_speakers', []))
-                known = [match for match in timed if all(
+                by_mode = phrase.get('forbidden_speakers_by_mode')
+                if by_mode is not None and set(by_mode) != set(sample['outputs']):
+                    raise ValueError('Every variant needs its own speaker label mapping')
+                forbidden = set(by_mode[mode] if by_mode is not None else phrase.get('forbidden_speakers', []))
+                known = [match for match in matches if all(
                     w.get('speaker') and w['speaker'] != 'SPEAKER_UNKNOWN'
                     and w['speaker'] not in forbidden for w in match)]
+                accepted = [match for match in timed if match in known]
                 checks.append({'id': phrase['id'], 'text_present': bool(matches),
                                'timing_in_reference_window': bool(timed),
+                               'timing_precision': phrase.get('timing_precision', 'unspecified'),
                                'separated_from_forbidden_speakers': bool(known),
-                               'pass': bool(known)})
+                               'observed_matches': [[{k: w.get(k) for k in ('word', 'start', 'end', 'speaker', 'score')}
+                                                     for w in match] for match in matches],
+                               'pass': bool(accepted)})
             diar_key = result['modes'][mode]['diarization']
             speaker_count = len({r['speaker'] for r in sample['diarization'][diar_key]['regular']})
             expected = ref.get('exact_speaker_count')
@@ -64,7 +71,8 @@ def evaluate(result, references):
                 checks.append({'id': 'independent_speaker_count', 'expected': expected,
                                'observed': speaker_count, 'pass': expected == speaker_count})
             # A control transcript is a comparison baseline, not ground truth.
-            changed = tokens(output['rawAsrText']) != tokens(sample['outputs']['control30']['rawAsrText'])
+            control = sample['outputs'].get('control30')
+            changed = tokens(output['rawAsrText']) != tokens(control['rawAsrText']) if control else None
             rows.append({'sample': sample['id'], 'mode': mode, 'checks': checks,
                          'reference_checks_pass': bool(checks) and all(x['pass'] for x in checks),
                          'text_changed_from_control': changed,
