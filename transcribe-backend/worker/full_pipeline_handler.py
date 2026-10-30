@@ -31,6 +31,9 @@ def validate(inp):
 
 
 def handler(job):
+    if isinstance(job.get('input'), dict) and job['input'].get('profile') == 'timed-turns-v1':
+        from timed_turns import handler as timed_handler
+        return timed_handler(job)
     if isinstance(job.get('input'),dict) and job['input'].get('profile') == 'release-candidate-v1':
         import candidate_pipeline
         return candidate_pipeline.handler(job)
