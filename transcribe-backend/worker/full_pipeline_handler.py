@@ -31,6 +31,9 @@ def validate(inp):
 
 
 def handler(job):
+    if isinstance(job.get('input'),dict) and job['input'].get('profile') == 'release-candidate-v1':
+        import candidate_pipeline
+        return candidate_pipeline.handler(job)
     if isinstance(job.get('input'),dict) and job['input'].get('profile') == 'speaker-short-turns-v1':
         import short_turn_comparison
         return short_turn_comparison.handler(job)

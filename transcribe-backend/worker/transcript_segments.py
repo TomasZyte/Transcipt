@@ -107,10 +107,12 @@ def build_segments(source_segments):
             stats["splitSegments"] += 1
         for turn in turns:
             raw_speaker = turn["speaker"]
-            speakers.setdefault(raw_speaker, f"Спикер {len(speakers) + 1}")
+            if raw_speaker != 'SPEAKER_UNKNOWN':
+                speakers.setdefault(raw_speaker, f"Спикер {len(speakers) + 1}")
             start, end = float(turn["start"]), float(turn["end"])
             output.append({"id": f"seg-{len(output) + 1}",
                            "startSec": round(start, 2), "endSec": round(end, 2),
                            "timestamp": f"{int(start // 60):02d}:{int(start % 60):02d}",
-                           "speaker": speakers[raw_speaker], "text": turn["text"]})
+                           "speaker": 'Спикер не определён' if raw_speaker == 'SPEAKER_UNKNOWN' else speakers[raw_speaker],
+                           "text": turn["text"]})
     return output, stats
