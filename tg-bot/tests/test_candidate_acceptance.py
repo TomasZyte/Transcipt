@@ -31,6 +31,14 @@ class AcceptanceTests(unittest.TestCase):
         self.assertFalse(report['release_ready'])
         self.assertTrue(report['rows'][0]['manual_review_required'])
 
+    def test_context_profile_cannot_claim_release_and_keeps_independent_gate(self):
+        self.result['profile'] = 'pause-context-v1'
+        self.assertTrue(self.check()['pass'])
+        self.result['samples'][0]['outputs']['control30']['attributed']['segments'][0]['words'][0]['speaker'] = 'A'
+        report = evaluate(self.result, self.refs)
+        self.assertFalse(report['rows'][0]['checks'][0]['pass'])
+        self.assertFalse(report['release_ready'])
+
     def test_early_alignment_and_wrong_adult_label_are_independent_failures(self):
         words = self.result['samples'][0]['outputs']['control30']['attributed']['segments'][0]['words']
         words[0]['start'] = 2

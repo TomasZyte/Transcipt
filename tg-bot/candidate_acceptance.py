@@ -25,7 +25,7 @@ def phrase_matches(words, phrase):
 
 
 def evaluate(result, references):
-    if (result.get('status') != 'completed' or result.get('profile') not in ('release-candidate-v1', 'timed-turns-v1', 'acoustic-turns-v1')
+    if (result.get('status') != 'completed' or result.get('profile') not in ('release-candidate-v1', 'timed-turns-v1', 'acoustic-turns-v1', 'pause-context-v1')
             or references.get('purpose') != 'evaluation_only'):
         raise ValueError('Completed candidate and independent evaluation references required')
     samples = result['samples']

@@ -31,6 +31,9 @@ def validate(inp):
 
 
 def handler(job):
+    if isinstance(job.get('input'), dict) and job['input'].get('profile') == 'pause-context-v1':
+        from pause_context import handler as pause_handler
+        return pause_handler(job)
     if isinstance(job.get('input'), dict) and job['input'].get('profile') == 'acoustic-turns-v1':
         from acoustic_turns import handler as acoustic_handler
         return acoustic_handler(job)
