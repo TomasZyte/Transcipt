@@ -20,7 +20,7 @@ COPY full_pipeline.py full_pipeline_handler.py contextual_asr.py context_pipelin
 ENV TIMED_TURNS_TEST=0 ACOUSTIC_TURNS_TEST=0 PAUSE_CONTEXT_TEST=0
 COPY transcript_candidate.py candidate_pipeline.py timed_turns.py acoustic_turns.py pause_context.py ./
 ENV CHANNEL_ASR_TEST=0
-COPY channel_asr.py channel_pipeline.py channel_runs.py ./
+COPY channel_asr.py channel_pipeline.py channel_runs.py channel_repair.py ./
 # CPU load validates public alignment assets; gated Community-1 stays test-runtime only.
 RUN python -c "from asr_comparison import offline_models; from prepare_full_assets import verify_bundle,verify_nltk; import full_pipeline_handler,speaker_comparison,whisperx; verify_bundle('/opt/full/alignment','alignment'); verify_nltk('/opt/full'); ctx=offline_models(); ctx.__enter__(); whisperx.load_align_model('ru','cpu',model_name='/opt/full/alignment',model_cache_only=True); print('FULL_PIPELINE_CPU_IMPORT_AND_ALIGNMENT_OK')"
 CMD ["python", "full_pipeline_handler.py"]

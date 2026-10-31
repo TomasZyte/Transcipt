@@ -34,7 +34,7 @@ def prepare(manifest_path, *, expected_profile=PROFILE):
     """Validate two complete, synchronised PCM channels without running models."""
     manifest_path = Path(manifest_path).resolve()
     data = read_json(manifest_path)
-    if expected_profile not in (PROFILE, 'channel-runs-v1'):
+    if expected_profile not in (PROFILE, 'channel-runs-v1', 'channel-repair-v1'):
         raise ValueError('Unknown channel profile')
     if set(data) != {'profile', 'source_sha256', 'confirmation', 'channels'} or data['profile'] != expected_profile:
         raise ValueError('Unexpected channel manifest')

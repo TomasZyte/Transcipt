@@ -52,6 +52,8 @@ jobs:
           import channel_asr, channel_pipeline
           import channel_runs
           channel_runs.verify_api()
+          import channel_repair
+          channel_repair.verify_api()
           acoustic_turns.verify_transform()
           short_turn_comparison.verify_filter_api()
           print("FULL_TEST_BUNDLE_VERIFIED; no GPU or gated model access")
