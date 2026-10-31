@@ -29,10 +29,10 @@ def history_files(runtime):
     return found
 
 
-def validate_billing(billing, now=None):
+def validate_billing(billing, now=None, *, period=('2026-10-01', '2026-10-31', 'окт. 1 31')):
     now = now or datetime.now(timezone.utc)
-    if (billing.get('endpoint') != full.ENDPOINT or billing.get('period_ui') != 'окт. 1 31'
-            or billing.get('period_start') != '2026-10-01' or billing.get('period_end') != '2026-10-31'
+    if (billing.get('endpoint') != full.ENDPOINT or billing.get('period_ui') != period[2]
+            or billing.get('period_start') != period[0] or billing.get('period_end') != period[1]
             or billing.get('period_timezone') != 'UTC' or billing.get('group') != 'Serverless / Endpoint'
             or billing.get('billing_lag_hours') != 1
             or not 0 <= (now - stamp(billing['observed_at_utc'])).total_seconds() <= 900):
