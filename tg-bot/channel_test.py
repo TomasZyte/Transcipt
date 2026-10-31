@@ -112,7 +112,8 @@ class ChannelRunner(full.FullRunner):
         isolated = replace(settings, runtime=root, max_jobs=1, budget=budget, prior_spend=prior)
         OneJobRunner.__init__(self, isolated, self.campaign_name, timeout_s=full.CLIENT_SECONDS, **kwargs)
         self.manifest = Path(c['manifest'])
-        self.plan = worker.adapter.prepare(self.manifest)
+        self.adapter = worker.adapter_for(self.output_profile)
+        self.plan = self.adapter.prepare(self.manifest)
         if self.plan['manifest_sha256'] != c['manifest_sha256']:
             raise ValueError('Channel manifest changed')
         self.rows = [{'id': r['channel'], 'path': str(self.manifest.parent / r['file']), 'sha256': r['sha256']}
@@ -120,6 +121,11 @@ class ChannelRunner(full.FullRunner):
         self.state.update(campaign_sha256=self.campaign_sha, channel_asr_validated=False,
                           audio_sha256={r['id']: r['sha256'] for r in self.rows})
         self.validate_history()
+        self.bind_prior(settings)
+
+    def bind_prior(self, settings):
+        c = self.campaign
+        prior = self.settings.prior_spend
         prior_runner = previous.PauseRunner(settings)
         if c.get('previous_campaign_sha256') != prior_runner.campaign_sha:
             raise ValueError('Prior campaign changed')
@@ -150,7 +156,7 @@ class ChannelRunner(full.FullRunner):
     def check_available(self):
         self.validate_history()
         self.validate_budget_files()
-        if worker.adapter.prepare(self.manifest) != self.plan:
+        if self.adapter.prepare(self.manifest) != self.plan:
             raise ValueError('Input changed')
         OneJobRunner.check_available(self)
         if any(self.path.parent.glob('*.json')) or any(self.path.parent.glob('*.tmp')):
@@ -168,7 +174,7 @@ class ChannelRunner(full.FullRunner):
     def payload(self, urls):
         if len(urls) != 2:
             raise ValueError('Exactly two channel URLs required')
-        return {'profile': worker.PROFILE, 'source_sha256': self.plan['source_sha256'],
+        return {'profile': self.output_profile, 'source_sha256': self.plan['source_sha256'],
                 'confirmation': self.plan['confirmation'], 'samples': [
                     {'id': r['id'], 'sha256': r['sha256'], 'media_url': url} for r, url in zip(self.rows, urls)]}
 

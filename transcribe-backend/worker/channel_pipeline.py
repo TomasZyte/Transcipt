@@ -24,6 +24,15 @@ FLAGS = {'FULL_PIPELINE_IMAGE': '1', 'FULL_PIPELINE_TEST': '1', 'CHANNEL_ASR_TES
               'TIMED_TURNS_TEST', 'ACOUSTIC_TURNS_TEST', 'PAUSE_CONTEXT_TEST')}}
 
 
+def adapter_for(profile):
+    if profile == PROFILE:
+        return adapter
+    if profile == 'channel-runs-v1':
+        import channel_runs
+        return channel_runs
+    raise ValueError('Unknown channel experiment')
+
+
 def require_test():
     if any(os.getenv(k, '0') != v for k, v in FLAGS.items()):
         raise ValueError('Dedicated channel test image and flags required')
@@ -31,7 +40,7 @@ def require_test():
 
 def validate_input(inp, storage_host=None):
     if (not isinstance(inp, dict) or set(inp) != {'profile', 'source_sha256', 'confirmation', 'samples'}
-            or inp['profile'] != PROFILE or not isinstance(inp['samples'], list)
+            or inp['profile'] not in (PROFILE, 'channel-runs-v1') or not isinstance(inp['samples'], list)
             or len(inp['samples']) != 2 or any(not isinstance(s, dict)
                 or set(s) != {'id', 'sha256', 'media_url'} for s in inp['samples'])
             or [s['id'] for s in inp['samples']] != list(adapter.CHANNELS)
@@ -53,13 +62,17 @@ def fetch_channel(sample, path):
 
 
 def validate_result(state, plan):
-    if (state.get('profile') != PROFILE or state.get('status') != 'completed'
+    selected = adapter_for(plan.get('profile', PROFILE))
+    if (state.get('profile') != selected.PROFILE or state.get('status') != 'completed'
             or state.get('input_plan') != input_contract(plan) or state.get('source_manifest_sha256') != digest(SOURCES)
             or state.get('human_quality_validated') is not False):
         raise ValueError('Unexpected channel result identity')
     result = state['result']
-    rebuilt = adapter.merge_channels(result['evidence'], plan['frames_per_channel'])
-    rebuilt.update(confirmation=plan['confirmation'], full_call_speaker_identity_verified=False)
+    if selected is adapter:
+        rebuilt = adapter.merge_channels(result['evidence'], plan['frames_per_channel'])
+        rebuilt.update(confirmation=plan['confirmation'], full_call_speaker_identity_verified=False)
+    else:
+        rebuilt = selected.rebuild(result, plan)
     if result != rebuilt:
         raise ValueError('Channel export does not match original evidence')
 
@@ -74,8 +87,9 @@ def execute(manifest, output_path):
     require_test()
     if Path(output_path).exists():
         raise ValueError('Never overwrite a previous attempt')
-    plan = adapter.prepare(manifest)
-    state = {'profile': PROFILE, 'status': 'started', 'phase': 'assets', 'input_plan': input_contract(plan),
+    selected = adapter_for(read_json(manifest)['profile'])
+    plan = selected.prepare(manifest)
+    state = {'profile': selected.PROFILE, 'status': 'started', 'phase': 'assets', 'input_plan': input_contract(plan),
              'source_manifest_sha256': digest(SOURCES), 'human_quality_validated': False}
     started = time.perf_counter()
     try:
@@ -99,7 +113,11 @@ def execute(manifest, output_path):
             if any(len(a) != plan['frames_per_channel'] for a in audio):
                 raise ValueError('Decoder changed the full channel duration')
             state['phase'] = 'transcribe_and_align'
-            state['result'] = adapter.decode_channels(*audio, transcribe=model.transcribe,
+            callbacks = {'transcribe': model.transcribe}
+            if selected is not adapter:
+                detect, transcribe = selected.callbacks(model, vad)
+                callbacks = {'detect': detect, 'transcribe': transcribe}
+            state['result'] = selected.decode_channels(*audio, **callbacks,
                 align=lambda segments, chunk: whisperx.align(segments, am, metadata, chunk, 'cuda', return_char_alignments=False),
                 confirmation=plan['confirmation'])
         state.update(status='completed', phase='complete')
@@ -123,11 +141,12 @@ def handler(job):
             stage = 'download_audio'
             for sample in samples:
                 fetch_channel(sample, root / (sample['id'] + '-full.wav'))
-            write_new(manifest, {'profile': PROFILE, 'source_sha256': inp['source_sha256'],
+            selected = adapter_for(inp['profile'])
+            write_new(manifest, {'profile': selected.PROFILE, 'source_sha256': inp['source_sha256'],
                 'confirmation': inp['confirmation'], 'channels': [
                     {'channel': s['id'], 'file': s['id'] + '-full.wav', 'sha256': s['sha256'],
                      'source_start_seconds': 0} for s in samples]})
-            adapter.prepare(manifest)
+            selected.prepare(manifest)
             stage = 'child'
             child = subprocess.run([sys.executable, str(Path(__file__)), '--manifest', str(manifest),
                 '--output', str(result_path)], timeout=270, stdout=subprocess.DEVNULL,

@@ -30,11 +30,13 @@ def _confirmation(value, duration):
         raise ValueError('Confirmation outside audio')
 
 
-def prepare(manifest_path):
+def prepare(manifest_path, *, expected_profile=PROFILE):
     """Validate two complete, synchronised PCM channels without running models."""
     manifest_path = Path(manifest_path).resolve()
     data = read_json(manifest_path)
-    if set(data) != {'profile', 'source_sha256', 'confirmation', 'channels'} or data['profile'] != PROFILE:
+    if expected_profile not in (PROFILE, 'channel-runs-v1'):
+        raise ValueError('Unknown channel profile')
+    if set(data) != {'profile', 'source_sha256', 'confirmation', 'channels'} or data['profile'] != expected_profile:
         raise ValueError('Unexpected channel manifest')
     if not isinstance(data['source_sha256'], str) or not SHA.fullmatch(data['source_sha256']):
         raise ValueError('Original source fingerprint required')
@@ -69,7 +71,7 @@ def prepare(manifest_path):
         raise ValueError('Distinct channels must have exactly equal lengths')
     duration = frames[0] / RATE
     _confirmation(data['confirmation'], duration)
-    return {'profile': PROFILE, 'status': 'prepared_not_run', 'manifest_sha256': digest(manifest_path),
+    return {'profile': expected_profile, 'status': 'prepared_not_run', 'manifest_sha256': digest(manifest_path),
             'source_sha256': data['source_sha256'], 'confirmation': deepcopy(data['confirmation']),
             'channels': deepcopy(rows), 'frames_per_channel': frames[0], 'duration_seconds': duration,
             'total_asr_audio_seconds': 2 * duration, 'asr_model': 'large-v3',

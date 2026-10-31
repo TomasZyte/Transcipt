@@ -50,6 +50,8 @@ jobs:
           import acoustic_turns
           import pause_context
           import channel_asr, channel_pipeline
+          import channel_runs
+          channel_runs.verify_api()
           acoustic_turns.verify_transform()
           short_turn_comparison.verify_filter_api()
           print("FULL_TEST_BUNDLE_VERIFIED; no GPU or gated model access")
