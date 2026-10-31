@@ -31,6 +31,9 @@ def validate(inp):
 
 
 def handler(job):
+    if isinstance(job.get('input'), dict) and job['input'].get('profile') == 'channel-asr-v1':
+        from channel_pipeline import handler as channel_handler
+        return channel_handler(job)
     if isinstance(job.get('input'), dict) and job['input'].get('profile') == 'pause-context-v1':
         from pause_context import handler as pause_handler
         return pause_handler(job)
