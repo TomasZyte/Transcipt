@@ -11,7 +11,7 @@ import test_channel_asr as fixture
 
 
 class RecoveryTests(unittest.TestCase):
-    def decode(self, native_text='Ответ.', no_speech=.05, logprob=-.2, empty=False, bad_alignment=False):
+    def decode(self, native_text=None, no_speech=.05, logprob=-.2, empty=False, bad_alignment=False):
         # Two valid runs plus the two regression types. No reference is sent.
         audio = range(15*r.RATE)
         self.calls = []
@@ -21,14 +21,16 @@ class RecoveryTests(unittest.TestCase):
                  'text': text} for w, text in zip(rows, ('Да.', 'Длинное.', 'Невыровнено.'))]}
         def recover(chunk):
             self.calls.append(chunk)
+            text = native_text or ('Длинное.' if chunk.start < 10*r.RATE else 'Невыровнено.')
             return {'language': 'ru', 'segments': [] if empty else [
-                {'start': .5, 'end': 1., 'text': native_text, 'no_speech_prob': no_speech,
-                 'avg_logprob': logprob, 'words': [{'word': native_text, 'start': .5, 'end': 1., 'probability': .9}]}]}
+                {'start': 2.3, 'end': 2.8, 'text': text, 'no_speech_prob': no_speech,
+                 'avg_logprob': logprob, 'words': [{'word': text, 'start': 2.3, 'end': 2.8, 'probability': .9}]}]}
         transcribe.recover = recover
         def align(segments, chunk):
             s = deepcopy(segments[0]); text = s['text']
-            s['words'] = [] if text == 'Невыровнено.' or (bad_alignment and text == native_text) else [
-                {'word': text, 'start': .1, 'end': 2.5 if text == 'Длинное.' else .4}]
+            recovered = 'avg_logprob' in s
+            s['words'] = [] if (text == 'Невыровнено.' and not recovered) or (bad_alignment and recovered) else [
+                {'word': text, 'start': .1, 'end': 2.5 if text == 'Длинное.' and not recovered else .4}]
             return {'segments': [s], 'word_segments': s['words']}
         with patch.dict(os.environ, {'CHANNEL_ASR_TEST': '1'}):
             return r.decode_channels(audio, audio,
@@ -43,12 +45,12 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(result['issues'])
         self.assertEqual(result['status'], 'candidate_unvalidated')
         self.assertFalse(result['release_ready'])
-        self.assertTrue(all(c['text_changed'] and not c['human_verified'] for c in result['changes']))
+        self.assertTrue(all(not c['text_changed'] and not c['human_verified'] for c in result['changes']))
         self.assertEqual(result['original']['run_evidence'][0]['runs'][1]['aligned_local']['segments'][0]['words'][0]['end'], 2.5)
         word = result['evidence'][0]['aligned']['segments'][1]['words'][0]
-        # global region 2.88 + native crop .4 + CTC word .1, exactly once.
-        self.assertAlmostEqual(word['start'], 3.38)
-        self.assertAlmostEqual(word['end'], 3.68)
+        # Native crop is floored to samples (2.1999375); offset exactly once.
+        self.assertAlmostEqual(word['start'], 5.1799375)
+        self.assertAlmostEqual(word['end'], 5.4799375)
 
     def test_empty_uncertain_or_unaligned_recovery_keeps_review_gate(self):
         for options, reason in (({'empty': True}, 'recovery_without_transcript'),
@@ -64,7 +66,39 @@ class RecoveryTests(unittest.TestCase):
     def test_no_phrase_blacklist_or_manual_replacement(self):
         result = self.decode(native_text='Продолжение следует...')
         self.assertEqual(result['changes'][0]['after'], 'Продолжение следует...')
-        self.assertIn('Продолжение следует...', [s['text'] for s in result['candidate_segments']])
+        self.assertIn('Продолжение следует...', [s['text'] for s in result['evidence'][0]['raw']['segments']])
+        self.assertIsNone(result['candidate_segments'])
+        self.assertTrue(any(i['reason'] == 'recognition_disagreement' for i in result['issues']))
+
+    def test_native_zero_or_long_words_cannot_be_laundered_by_valid_ctc(self):
+        result = self.decode()
+        for a, b in ((2.3, 2.3), (0., 2.3)):
+            bad = deepcopy(result)
+            # Native words survive in raw_local too; mutate both to model an
+            # actual decoder failure, without breaking the evidence contract.
+            for segment in (bad['recovery_evidence'][0]['native']['segments'][0],
+                            bad['recovery_evidence'][0]['phrases'][0]['raw_local']['segments'][0]):
+                segment['words'][0].update(start=a, end=b)
+            rebuilt = r.rebuild(bad, {'frames_per_channel': 15*r.RATE, 'confirmation': result['confirmation']})
+            self.assertIsNone(rebuilt['candidate_segments'])
+            self.assertTrue(any(i['reason'].startswith('native_') for i in rebuilt['issues']))
+
+    def test_neighbour_only_recovery_cannot_drop_failed_run(self):
+        result = self.decode()
+        evidence = deepcopy(result['recovery_evidence'])
+        first = evidence[0]
+        first['native']['segments'][0].update(start=.5, end=1.)
+        first['native']['segments'][0]['words'][0].update(start=.5, end=1.)
+        win = r.alignment_window(first['native']['segments'][0], first['region']['end_frame']-first['region']['start_frame'])
+        first['phrases'][0]['window'] = win
+        first['phrases'][0]['raw_local']['segments'][0] = {
+            **deepcopy(first['native']['segments'][0]), 'start':0., 'end':(win['end_frame']-win['start_frame'])/r.RATE}
+        modern = r.assemble(result['original'], evidence, 15*r.RATE, result['confirmation'])
+        legacy = r.assemble(result['original'], evidence, 15*r.RATE, result['confirmation'], assembly_version=1)
+        self.assertIsNone(modern['candidate_segments'])
+        self.assertTrue(any(i['reason'] == 'recovery_does_not_cover_original_run' for i in modern['issues']))
+        self.assertEqual(legacy['status'], 'candidate_unvalidated')
+        self.assertEqual(r.rebuild(legacy, {'frames_per_channel':15*r.RATE,'confirmation':result['confirmation']}), legacy)
 
     def test_intersecting_context_includes_neighbour_in_full_and_merges_regions(self):
         result = self.decode()

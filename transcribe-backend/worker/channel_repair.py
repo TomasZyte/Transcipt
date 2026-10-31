@@ -105,7 +105,9 @@ def alignment_window(segment, frames):
     return {'start_frame': left, 'end_frame': right}
 
 
-def assemble(control, recoveries, frames, confirmation):
+def assemble(control, recoveries, frames, confirmation, *, assembly_version=2):
+    if type(assembly_version) is not int or assembly_version not in (1, 2):
+        raise ValueError('Unknown recovery assembly version')
     checked = runs.assemble(control['run_evidence'], frames, confirmation)
     if control != checked:
         raise ValueError('Original run evidence changed')
@@ -130,6 +132,12 @@ def assemble(control, recoveries, frames, confirmation):
             after = ''.join(s['text'] for s in native['segments'])
             changes.append({'channel': channel, 'region': ri, 'before': before, 'after': after,
                             'text_changed': before.split() != after.split(), 'human_verified': False})
+            # CTC is forced alignment, not an independent check of recognition.
+            # A fluent alternative with good-looking CTC times can still be a
+            # hallucination. Preserve disagreement and native timing failures.
+            if assembly_version == 2 and before.split() != after.split():
+                issues.append({'channel': channel, 'region': ri, 'reason': 'recognition_disagreement'})
+            covered = []
             for si, (segment, phrase) in enumerate(zip(native['segments'], recovery['phrases'])):
                 win = alignment_window(segment, count)
                 duration = (win['end_frame']-win['start_frame'])/RATE
@@ -137,9 +145,19 @@ def assemble(control, recoveries, frames, confirmation):
                 raw = {'language': 'ru', 'segments': [local]}
                 if phrase['window'] != win or phrase['raw_local'] != raw:
                     raise ValueError('Recovered text or crop differs from native evidence')
+                if assembly_version == 2:
+                    try:
+                        base._tokens({'channel': channel,
+                            'raw': {'language': 'ru', 'segments': [segment]},
+                            'aligned': {'segments': [segment]}}, count/RATE, time_tolerance=.0005)
+                    except (ValueError, TypeError, KeyError) as exc:
+                        issues.append({'channel': channel, 'region': ri, 'phrase': si,
+                            'reason': 'native_' + (str(exc) if isinstance(exc, ValueError) else 'invalid_word_evidence')})
                 try:
-                    base._tokens({'channel': channel, 'raw': raw, 'aligned': phrase['aligned_local']},
-                                 duration, time_tolerance=.0005)
+                    tokens = base._tokens({'channel': channel, 'raw': raw, 'aligned': phrase['aligned_local']},
+                                          duration, time_tolerance=.0005)
+                    offset = (region['start_frame']+win['start_frame'])/RATE
+                    covered.extend((offset+t['startSec'], offset+t['endSec']) for t in tokens)
                 except (ValueError, TypeError, KeyError) as exc:
                     issues.append({'channel': channel, 'region': ri, 'phrase': si,
                                    'reason': str(exc) if isinstance(exc, ValueError) else 'invalid_recovery_alignment'})
@@ -150,6 +168,14 @@ def assemble(control, recoveries, frames, confirmation):
                     issues.append({'channel': channel, 'region': ri, 'phrase': si,
                                    'reason': 'uncertain_recognition'})
                 pieces.append((region['start_frame']+win['start_frame'], raw, phrase['aligned_local']))
+            if assembly_version == 2:
+                # Context can decode only a neighbour and omit the failed run.
+                # Do not report that omission as a successful timing repair.
+                for j in region['replaced_runs']:
+                    w = original['runs'][j]['window']
+                    if not any(a < w['end_frame']/RATE and b > w['start_frame']/RATE for a, b in covered):
+                        issues.append({'channel': channel, 'region': ri, 'run': j,
+                                       'reason': 'recovery_does_not_cover_original_run'})
         raw_all, aligned_all = [], []
         for offset, raw, aligned in sorted(pieces, key=lambda p: p[0]):
             raw_all.extend(runs.global_alignment(raw, offset/RATE)['segments'])
@@ -161,6 +187,8 @@ def assemble(control, recoveries, frames, confirmation):
                   repair_policy=deepcopy(POLICY), recovery_decoder=deepcopy(DECODER), changes=changes,
                   confirmation=deepcopy(confirmation), full_call_speaker_identity_verified=False)
     result['issues'].extend(issues)
+    if assembly_version == 2:
+        result['assembly_version'] = 2
     if result['issues']: result.update(status='review_required', candidate_segments=None)
     return model_evidence(result)
 
@@ -188,4 +216,5 @@ def decode_channels(left, right, *, detect, transcribe, align, confirmation):
 
 
 def rebuild(result, plan):
-    return assemble(result['original'], result['recovery_evidence'], plan['frames_per_channel'], plan['confirmation'])
+    return assemble(result['original'], result['recovery_evidence'], plan['frames_per_channel'], plan['confirmation'],
+                    assembly_version=result.get('assembly_version', 1))
