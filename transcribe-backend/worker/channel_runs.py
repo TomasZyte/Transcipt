@@ -121,8 +121,15 @@ def callbacks(model, vad):
     return detect, transcribe
 
 
-def assemble(evidence, frames, confirmation):
+def assemble(evidence, frames, confirmation, *, assembly_version=2):
     """Replay every offset from retained local evidence; never repair word times."""
+    if type(assembly_version) is not int or assembly_version not in (1, 2):
+        raise ValueError('Unknown assembly version')
+    # WhisperX 3.8.6 rounds local alignment times to 3 decimal places. A
+    # sample-exact crop need not end on a millisecond. Preserve those outputs,
+    # allowing only half a millisecond at the boundary, never a longer word.
+    # Version 1 remains replayable exactly for the original immutable GPU run.
+    tolerance = .0005 if assembly_version == 2 else 0.
     if [r.get('channel') for r in evidence] != list(CHANNELS):
         raise ValueError('Missing channel evidence')
     channel_rows, local_issues = [], []
@@ -148,7 +155,8 @@ def assemble(evidence, frames, confirmation):
             # Strict local bounds catch a time escaping its run even if global
             # bounds would still be valid. Evidence remains available for review.
             try:
-                base._tokens({'raw': raw, 'aligned': aligned, 'channel': item['channel']}, duration)
+                base._tokens({'raw': raw, 'aligned': aligned, 'channel': item['channel']}, duration,
+                             time_tolerance=tolerance)
             except (ValueError, KeyError, TypeError) as exc:
                 local_issues.append({'channel': item['channel'], 'run': ri,
                     'reason': str(exc) if isinstance(exc, ValueError) else 'invalid_local_alignment'})
@@ -157,9 +165,11 @@ def assemble(evidence, frames, confirmation):
             aligned_all.extend(global_alignment(aligned, offset)['segments'])
         channel_rows.append({'channel': item['channel'], 'raw': {'language': 'ru', 'segments': raw_all},
                              'aligned': {'segments': aligned_all}})
-    result = base.merge_channels(channel_rows, frames)
+    result = base.merge_channels(channel_rows, frames, time_tolerance=tolerance)
     result.update(profile=PROFILE, speech_run_policy=deepcopy(POLICY), run_evidence=model_evidence(deepcopy(evidence)),
                   confirmation=deepcopy(confirmation), full_call_speaker_identity_verified=False)
+    if assembly_version == 2:
+        result.update(assembly_version=2, alignment_time_quantum_seconds=.001)
     if local_issues:
         result['issues'].extend(local_issues)
         result.update(status='review_required', candidate_segments=None)
@@ -195,4 +205,5 @@ def decode_channels(left, right, *, detect, transcribe, align, confirmation):
 
 
 def rebuild(result, plan):
-    return assemble(result['run_evidence'], plan['frames_per_channel'], plan['confirmation'])
+    return assemble(result['run_evidence'], plan['frames_per_channel'], plan['confirmation'],
+                    assembly_version=result.get('assembly_version', 1))

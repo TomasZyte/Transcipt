@@ -105,6 +105,34 @@ class RunDecodeTests(unittest.TestCase):
         state['result']['evidence'][0]['aligned']['segments'][0]['words'][0]['start'] += .1
         with self.assertRaises(ValueError): worker.validate_result(state, plan)
 
+    def test_known_millisecond_rounding_is_allowed_without_editing_times_or_relaxing_long_words(self):
+        result = self.decode()
+        evidence = deepcopy(result['run_evidence'])
+        # One-sample-exact crop whose end rounds upwards at millisecond precision.
+        evidence[0]['speech'][0]['end'] = .9995625
+        planned = r.windows(evidence[0]['speech'], 12*r.RATE)
+        run = evidence[0]['runs'][0]
+        run['window'] = planned[0]
+        duration = (planned[0]['end_frame']-planned[0]['start_frame'])/r.RATE
+        run['raw_local']['segments'][0]['end'] = duration
+        run['decoder_segment_global']['end'] = round(duration, 3)
+        run['aligned_local']['segments'][0]['words'][-1]['end'] = round(duration, 3)
+        before = deepcopy(evidence)
+        modern = r.assemble(evidence, 12*r.RATE, result['confirmation'])
+        legacy = r.assemble(evidence, 12*r.RATE, result['confirmation'], assembly_version=1)
+        self.assertEqual(modern['status'], 'candidate_unvalidated')
+        self.assertEqual(legacy['status'], 'review_required')
+        self.assertEqual(evidence, before)
+        plan = {'frames_per_channel': 12*r.RATE, 'confirmation':result['confirmation']}
+        self.assertEqual(r.rebuild(legacy, plan), legacy)
+        self.assertEqual(r.rebuild(modern, plan), modern)
+        run['aligned_local']['segments'][0]['words'][-1]['end'] += .001
+        self.assertIsNone(r.assemble(evidence, 12*r.RATE, result['confirmation'])['candidate_segments'])
+        item = {'channel':'left','raw':{'language':'ru','segments':[{'text':'Слово.'}]},
+                'aligned':{'segments':[{'text':'Слово.','words':[{'word':'Слово.','start':0.,'end':2.0001}]}]}}
+        with self.assertRaisesRegex(ValueError, 'long_word_requires_review'):
+            r.base._tokens(item, 3., time_tolerance=.0005)
+
     def test_missing_guard_stops_before_any_callback(self):
         callback = Mock()
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(ValueError):

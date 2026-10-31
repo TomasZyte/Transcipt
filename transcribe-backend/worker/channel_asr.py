@@ -84,7 +84,7 @@ def _plain(segments):
     return ''.join(''.join(s['text'].split()) for s in segments)
 
 
-def _tokens(item, duration):
+def _tokens(item, duration, *, time_tolerance=0.):
     raw, aligned = item['raw']['segments'], item['aligned']['segments']
     if item['raw'].get('language') != 'ru':
         raise ValueError('unexpected_language')
@@ -102,7 +102,7 @@ def _tokens(item, duration):
             if not token or offset < 0 or any(c.isalnum() for c in text[cursor:offset]):
                 raise ValueError('unmapped_text')
             start, end = word.get('start'), word.get('end')
-            if not all(finite(x) for x in (start, end)) or not 0 <= start < end <= duration:
+            if not all(finite(x) for x in (start, end)) or not 0 <= start < end <= duration + time_tolerance:
                 raise ValueError('unreliable_word_time')
             if start < previous:
                 raise ValueError('unordered_words')
@@ -123,17 +123,19 @@ def _tokens(item, duration):
     return result
 
 
-def merge_channels(evidence, frame_count):
+def merge_channels(evidence, frame_count, *, time_tolerance=0.):
     """Interleave words without clipping overlaps, assigning roles or removing echo."""
     if type(frame_count) is not int or not 0 < frame_count <= RATE * MAX_SECONDS:
         raise ValueError('Unsupported channel duration')
+    if type(time_tolerance) not in (int, float) or time_tolerance not in (0., .0005):
+        raise ValueError('Only the pinned millisecond rounding tolerance is supported')
     evidence = model_evidence(deepcopy(evidence))
     if not isinstance(evidence, list) or [r.get('channel') for r in evidence] != list(CHANNELS):
         raise ValueError('Exactly two ordered channel results required')
     tokens, issues = [], []
     for item in evidence:
         try:
-            tokens.extend(_tokens(item, frame_count / RATE))
+            tokens.extend(_tokens(item, frame_count / RATE, time_tolerance=time_tolerance))
         except (ValueError, KeyError, TypeError) as exc:
             issues.append({'channel': item['channel'], 'reason': str(exc) if isinstance(exc, ValueError)
                            else 'invalid_model_evidence'})
