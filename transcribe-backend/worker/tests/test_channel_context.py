@@ -4,11 +4,15 @@ from pathlib import Path
 import sys
 import unittest
 from unittest.mock import Mock, patch
+import json
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import channel_context as c
 import channel_pipeline as pipeline
 import test_channel_speech_v2 as previous
+import test_channel_asr as input_fixture
+import test_channel_pipeline as payload_fixture
+import full_pipeline_handler as router
 
 FLAGS = {**pipeline.FLAGS, 'CHANNEL_CONTEXT_TEST': '1'}
 
@@ -131,8 +135,13 @@ class ContextTests(unittest.TestCase):
             bad=deepcopy(result); change(bad)
             with self.assertRaises(ValueError):c.validate_result(bad)
 
-    def test_no_cloud_route_and_decoder_unchanged(self):
-        with self.assertRaises(ValueError): pipeline.adapter_for(c.PROFILE)
+    def test_test_route_requires_additional_flag_and_decoder_unchanged(self):
+        self.assertIs(pipeline.adapter_for(c.PROFILE), c)
+        with patch.dict(os.environ,pipeline.FLAGS,clear=True), self.assertRaises(ValueError):
+            pipeline.require_profile(c.PROFILE)
+        with patch.dict(os.environ,FLAGS,clear=True):
+            pipeline.require_profile(c.PROFILE)
+            with self.assertRaises(ValueError): pipeline.require_profile('channel-speech-v2')
         self.assertEqual(c.DECODER,c.repair.DECODER)
         self.assertIsNone(c.DECODER['initial_prompt'])
         self.assertFalse(c.DECODER['condition_on_previous_text'])
@@ -150,6 +159,34 @@ class ContextTests(unittest.TestCase):
         self.assertFalse(prepared['cloud_runner_connected'])
         self.assertNotIn('Тихая',str(prepared))
         with self.assertRaises(ValueError): c.prepare_from_saved(state,{**plan,'source_sha256':'b'*64})
+
+
+class ContextIntegrationTests(unittest.TestCase):
+    setUp = input_fixture.ChannelInputTests.setUp
+
+    def test_manifest_route_and_pre_download_gate(self):
+        self.data['profile']=c.PROFILE
+        self.manifest.write_text(json.dumps(self.data),encoding='utf-8')
+        plan=c.prepare(self.manifest)
+        self.assertEqual(plan['context_decoder'],c.DECODER)
+        payload=payload_fixture.ChannelWorkerTests().payload();payload['profile']=c.PROFILE
+        pipeline.validate_input(payload,payload_fixture.HOST)
+        with patch.dict(os.environ,pipeline.FLAGS,clear=True),patch.object(pipeline,'fetch_channel') as fetch:
+            self.assertEqual(router.handler({'input':payload})['phase'],'validate')
+            fetch.assert_not_called()
+        payload['reference']='private'
+        with self.assertRaises(ValueError):pipeline.validate_input(payload,payload_fixture.HOST)
+
+    def test_worker_envelope_rejects_different_frames_and_confirmation(self):
+        result=ContextTests().decode()
+        plan={'profile':c.PROFILE,'frames_per_channel':8*c.RATE,'confirmation':result['confirmation']}
+        state={'profile':c.PROFILE,'status':'completed','input_plan':plan,
+               'source_manifest_sha256':pipeline.digest(pipeline.SOURCES),
+               'human_quality_validated':False,'result':result}
+        pipeline.validate_result(state,plan)
+        wrong={**plan,'confirmation':{**plan['confirmation'],'end_seconds':7}}
+        bad={**state,'input_plan':wrong}
+        with self.assertRaises(ValueError):pipeline.validate_result(bad,wrong)
 
 
 if __name__=='__main__':unittest.main()

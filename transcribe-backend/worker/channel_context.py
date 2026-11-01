@@ -1,7 +1,7 @@
 """Offline-prepared WhisperX experiment: contextual ASR, speech-bounded CTC.
 
 One ASR pass over contiguous same-channel blocks, including original pauses.
-No production/cloud route, model loader, download or submission in this module.
+No production route, model loader, download or submission in this module.
 Every run has one owner block; context-only words are retained as evidence.
 """
 from copy import deepcopy
@@ -21,6 +21,14 @@ POLICY = {'core_seconds': 24., 'context_seconds': 3., 'max_block_seconds': 30.,
 # Retain probable silence for audit. High no_speech is a review flag, not an
 # automatic deletion: the known final thanks also had high no_speech evidence.
 DECODER = deepcopy(repair.DECODER)
+verify_api = repair.verify_api
+
+
+def prepare(manifest):
+    plan = base.prepare(manifest, expected_profile=PROFILE)
+    plan.update(speech_run_policy=deepcopy(runs.POLICY), context_policy=deepcopy(POLICY),
+                context_decoder=deepcopy(DECODER))
+    return plan
 
 
 def require_test():
@@ -223,6 +231,10 @@ def validate_result(result):
     rebuilt = assemble(result['evidence'], result['frames_per_channel'], result['confirmation'])
     if rebuilt != result:
         raise ValueError('Context result differs from original evidence')
+
+
+def rebuild(result, plan):
+    return assemble(result['evidence'], plan['frames_per_channel'], plan['confirmation'])
 
 
 def prepare_from_saved(state, source_plan):

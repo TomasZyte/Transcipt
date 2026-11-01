@@ -40,6 +40,7 @@ jobs:
           assert os.environ["ACOUSTIC_TURNS_TEST"] == "0"
           assert os.environ["PAUSE_CONTEXT_TEST"] == "0"
           assert os.environ["CHANNEL_ASR_TEST"] == "0"
+          assert os.environ["CHANNEL_CONTEXT_TEST"] == "0"
           verify_assets("/opt/asr/model-lock.json", config_for("wx_auto"))
           verify_bundle("/opt/full/alignment", "alignment")
           verify_nltk("/opt/full")
@@ -58,6 +59,8 @@ jobs:
           channel_speech.verify_api()
           import channel_speech_v2
           channel_speech_v2.verify_api()
+          import channel_context
+          channel_context.verify_api()
           acoustic_turns.verify_transform()
           short_turn_comparison.verify_filter_api()
           print("FULL_TEST_BUNDLE_VERIFIED; no GPU or gated model access")

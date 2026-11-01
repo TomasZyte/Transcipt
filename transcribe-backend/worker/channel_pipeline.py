@@ -39,6 +39,9 @@ def adapter_for(profile):
     if profile == 'channel-speech-v2':
         import channel_speech_v2
         return channel_speech_v2
+    if profile == 'channel-context-v1':
+        import channel_context
+        return channel_context
     raise ValueError('Unknown channel experiment')
 
 
@@ -47,9 +50,17 @@ def require_test():
         raise ValueError('Dedicated channel test image and flags required')
 
 
+def require_profile(profile):
+    require_test()
+    if profile == 'channel-context-v1':
+        adapter_for(profile).require_test()
+    elif os.getenv('CHANNEL_CONTEXT_TEST', '0') != '0':
+        raise ValueError('Context flag cannot enable another channel profile')
+
+
 def validate_input(inp, storage_host=None):
     if (not isinstance(inp, dict) or set(inp) != {'profile', 'source_sha256', 'confirmation', 'samples'}
-            or inp['profile'] not in (PROFILE, 'channel-runs-v1', 'channel-repair-v1', 'channel-speech-v1', 'channel-speech-v2') or not isinstance(inp['samples'], list)
+            or inp['profile'] not in (PROFILE, 'channel-runs-v1', 'channel-repair-v1', 'channel-speech-v1', 'channel-speech-v2', 'channel-context-v1') or not isinstance(inp['samples'], list)
             or len(inp['samples']) != 2 or any(not isinstance(s, dict)
                 or set(s) != {'id', 'sha256', 'media_url'} for s in inp['samples'])
             or [s['id'] for s in inp['samples']] != list(adapter.CHANNELS)
@@ -97,6 +108,7 @@ def execute(manifest, output_path):
     if Path(output_path).exists():
         raise ValueError('Never overwrite a previous attempt')
     selected = adapter_for(read_json(manifest)['profile'])
+    require_profile(selected.PROFILE)
     plan = selected.prepare(manifest)
     state = {'profile': selected.PROFILE, 'status': 'started', 'phase': 'assets', 'input_plan': input_contract(plan),
              'source_manifest_sha256': digest(SOURCES), 'human_quality_validated': False}
@@ -144,6 +156,7 @@ def handler(job):
         require_test()
         inp = job.get('input')
         samples = validate_input(inp)
+        require_profile(inp['profile'])
         with tempfile.TemporaryDirectory(prefix='channel-test-') as directory:
             root = Path(directory)
             manifest, result_path = root/'input.json', root/'result.json'
