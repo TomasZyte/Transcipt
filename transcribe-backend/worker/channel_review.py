@@ -24,6 +24,8 @@ REASONS = {
     'long_word_requires_review': 'Слово растянуто более чем на две секунды',
     'missing_word_times': 'Нет выравнивания слов',
     'unreliable_word_time': 'Некорректное время слова',
+    'weak_phrase_alignment': 'У значительной части фразы слабое выравнивание; слова требуют проверки',
+    'repeated_low_confidence_phrase': 'Повторяющаяся фраза со слабым выравниванием',
 }
 
 
@@ -46,7 +48,7 @@ def disagreements(rows, control_text):
 
 
 def build(state, control):
-    if state.get('profile') != 'channel-speech-v1' or control.get('profile') != 'channel-asr-v1':
+    if state.get('profile') not in ('channel-speech-v1', 'channel-speech-v2') or control.get('profile') != 'channel-asr-v1':
         raise ValueError('Expected saved speech-bounded and full-channel results')
     for item in (state, control):
         channel_pipeline.validate_result(item, item['input_plan'])

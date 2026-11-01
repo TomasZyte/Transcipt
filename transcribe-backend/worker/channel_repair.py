@@ -50,8 +50,14 @@ def callbacks(model, vad):
     return detect, transcribe
 
 
-def region_plan(control, frames):
+def region_plan(control, frames, *, extra_seeds=()):
     """Expand failed local runs, including intersected neighbours in full."""
+    extra_seeds = tuple(extra_seeds)
+    valid = {(item['channel'], i) for item in control['run_evidence']
+             for i in range(len(item['runs']))}
+    if any(type(i) is not int or (channel, i) not in valid for channel, i in extra_seeds):
+        raise ValueError('Unknown additional recovery run')
+    extra_seeds = set(extra_seeds)
     result = []
     for item in control['run_evidence']:
         rows = item['runs']
@@ -62,6 +68,8 @@ def region_plan(control, frames):
                 base._tokens({'channel': item['channel'], 'raw': row['raw_local'],
                               'aligned': row['aligned_local']}, duration, time_tolerance=.0005)
             except (ValueError, TypeError, KeyError):
+                seeds.append(i)
+            if (item['channel'], i) in extra_seeds and i not in seeds:
                 seeds.append(i)
         areas = []
         for i in seeds:

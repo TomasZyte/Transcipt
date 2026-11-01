@@ -50,10 +50,10 @@ def local_input(original, index, native, assigned):
     return {'language': 'ru', 'segments': [{'start': 0., 'end': duration, 'text': text}]} if text.strip() else None
 
 
-def assemble(control, recoveries, frames, confirmation):
+def assemble(control, recoveries, frames, confirmation, *, region_planner=repair.region_plan):
     if control != runs.assemble(control['run_evidence'], frames, confirmation):
         raise ValueError('Original speech evidence changed')
-    planned = repair.region_plan(control, frames)
+    planned = region_planner(control, frames)
     if [r['region'] for r in recoveries] != planned:
         raise ValueError('Recovery regions differ from automatic plan')
     channels, issues, review = [], [], []
@@ -129,10 +129,17 @@ def assemble(control, recoveries, frames, confirmation):
 
 
 def decode_channels(left, right, *, detect, transcribe, align, confirmation):
+    return decode_with_plan(left, right, detect=detect, transcribe=transcribe, align=align,
+                            confirmation=confirmation, region_planner=repair.region_plan,
+                            assembler=assemble)
+
+
+def decode_with_plan(left, right, *, detect, transcribe, align, confirmation, region_planner, assembler):
+    """Shared execution; only code selects a planner, never an API payload."""
     original = runs.decode_channels(left, right, detect=detect, transcribe=transcribe,
                                     align=align, confirmation=confirmation)
     recoveries = []
-    for region in repair.region_plan(original, len(left)):
+    for region in region_planner(original, len(left)):
         channel = next(r for r in original['run_evidence'] if r['channel'] == region['channel'])
         audio = left if region['channel'] == 'left' else right
         native = model_evidence(deepcopy(transcribe.recover(audio[region['start_frame']:region['end_frame']])))
@@ -146,7 +153,7 @@ def decode_channels(left, right, *, detect, transcribe, align, confirmation):
             alignments.append({'run': index, 'window': deepcopy(window), 'source_segments': assigned,
                                'raw_local': raw, 'aligned_local': aligned})
         recoveries.append({'region': region, 'native': native, 'unassigned': unassigned, 'alignments': alignments})
-    return assemble(original, recoveries, len(left), confirmation)
+    return assembler(original, recoveries, len(left), confirmation)
 
 
 def rebuild(result, plan):

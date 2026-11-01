@@ -36,6 +36,9 @@ def adapter_for(profile):
     if profile == 'channel-speech-v1':
         import channel_speech
         return channel_speech
+    if profile == 'channel-speech-v2':
+        import channel_speech_v2
+        return channel_speech_v2
     raise ValueError('Unknown channel experiment')
 
 
@@ -46,7 +49,7 @@ def require_test():
 
 def validate_input(inp, storage_host=None):
     if (not isinstance(inp, dict) or set(inp) != {'profile', 'source_sha256', 'confirmation', 'samples'}
-            or inp['profile'] not in (PROFILE, 'channel-runs-v1', 'channel-repair-v1', 'channel-speech-v1') or not isinstance(inp['samples'], list)
+            or inp['profile'] not in (PROFILE, 'channel-runs-v1', 'channel-repair-v1', 'channel-speech-v1', 'channel-speech-v2') or not isinstance(inp['samples'], list)
             or len(inp['samples']) != 2 or any(not isinstance(s, dict)
                 or set(s) != {'id', 'sha256', 'media_url'} for s in inp['samples'])
             or [s['id'] for s in inp['samples']] != list(adapter.CHANNELS)
