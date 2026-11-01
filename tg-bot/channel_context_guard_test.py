@@ -19,6 +19,24 @@ PERIOD = previous.PERIOD
 EXPECTED_JOBS = {'completed': 23, 'failed': 1, 'inProgress': 0, 'inQueue': 0, 'retried': 2}
 
 
+def validate_pre_submit_health(health, expected):
+    """One capacity-waiting worker is not a running job; history stays exact.
+
+    RunPod worker lifecycle documents throttled as host GPUs busy. Do not
+    accept initializing/running/unhealthy workers or an additional request.
+    """
+    workers = health.get('workers', {})
+    if (set(health) != set(expected) or health.get('jobs') != expected['jobs']
+            or set(workers) != set(expected['workers'])
+            or any(type(v) is not int or v < 0 for v in workers.values())):
+        raise RuntimeError('Test endpoint history or worker schema changed')
+    allowed = [dict(expected['workers'])]
+    allowed.append({**expected['workers'], 'idle': 1, 'ready': 1})
+    allowed.append({**expected['workers'], 'throttled': 1})
+    if any(expected['workers'].values()) or workers not in allowed:
+        raise RuntimeError('Only one idle or capacity-waiting test worker allowed')
+
+
 def history_files(runtime):
     found = previous.history_files(runtime)
     folder = runtime/previous.PROFILE/'jobs'
@@ -66,6 +84,15 @@ class GuardRunner(base.ChannelRunner):
     campaign_name = output_profile = PROFILE
     history_files = staticmethod(history_files)
     additional_preflight = {**base.ChannelRunner.additional_preflight, 'channel_context_enabled': True, 'channel_context_guard_enabled': True}
+
+    async def health(self):
+        async with asyncio.timeout(20), self.client_factory(timeout=15) as client:
+            response = await client.get(self.url+'/health', headers=self.headers)
+            response.raise_for_status()
+            observed = response.json()
+        validate_pre_submit_health(observed, self.expected_health)
+        # Written with the one-attempt journal before POST, never an extra job.
+        self.state['pre_submit_health'] = observed
 
     def bind_prior(self, settings):
         prior = previous.ContextRunner(settings)

@@ -18,6 +18,7 @@ class GuardBudgetTests(unittest.TestCase):
         self.bill=deepcopy(old.bill)
         self.health=deepcopy(old.health)
         self.health['health']['jobs']=deepcopy(r.EXPECTED_JOBS)
+        self.health['health']['workers']={k:0 for k in ('idle','initializing','ready','running','throttled','unhealthy')}
         self.stop={**deepcopy(self.health),'observed_at_utc':(self.now-timedelta(minutes=20)).isoformat(),
                    'max_workers':0,'active_workers':0,'release':73}
         self.journals=[{'status':'COMPLETED','submitted_at':i} for i in range(23)]
@@ -83,6 +84,24 @@ class GuardBudgetTests(unittest.TestCase):
              patch.object(r,'GuardRunner',return_value=runner),patch('builtins.print'):
             self.assertEqual(r.main(),0)
         runner.execute.assert_not_called()
+
+    def test_capacity_wait_is_allowed_without_changing_job_history(self):
+        expected=deepcopy(self.health['health'])
+        for changes in ({},{'idle':1,'ready':1},{'throttled':1}):
+            health=deepcopy(expected);health['workers'].update(changes)
+            r.validate_pre_submit_health(health,expected)
+        self.assertEqual(expected,self.health['health'])
+
+    def test_busy_initializing_extra_workers_and_changed_counts_still_block(self):
+        expected=deepcopy(self.health['health'])
+        for changes in ({'throttled':2},{'initializing':1},{'running':1},
+                        {'unhealthy':1},{'throttled':1,'idle':1,'ready':1},
+                        {'throttled':True},{'ready':1}):
+            health=deepcopy(expected);health['workers'].update(changes)
+            with self.assertRaises(RuntimeError):r.validate_pre_submit_health(health,expected)
+        for changes in ({'inQueue':1},{'inProgress':1},{'completed':24}):
+            health=deepcopy(expected);health['jobs'].update(changes)
+            with self.assertRaises(RuntimeError):r.validate_pre_submit_health(health,expected)
 
 
 if __name__=='__main__':unittest.main()
