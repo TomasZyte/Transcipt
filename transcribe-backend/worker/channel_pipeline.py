@@ -42,6 +42,9 @@ def adapter_for(profile):
     if profile == 'channel-context-v1':
         import channel_context
         return channel_context
+    if profile == 'channel-context-guard-v1':
+        import channel_context_guard
+        return channel_context_guard
     raise ValueError('Unknown channel experiment')
 
 
@@ -52,7 +55,9 @@ def require_test():
 
 def require_profile(profile):
     require_test()
-    if profile == 'channel-context-v1':
+    if profile != 'channel-context-guard-v1' and os.getenv('CHANNEL_CONTEXT_GUARD_TEST', '0') != '0':
+        raise ValueError('Guard flag cannot enable another channel profile')
+    if profile in ('channel-context-v1', 'channel-context-guard-v1'):
         adapter_for(profile).require_test()
     elif os.getenv('CHANNEL_CONTEXT_TEST', '0') != '0':
         raise ValueError('Context flag cannot enable another channel profile')
@@ -60,7 +65,7 @@ def require_profile(profile):
 
 def validate_input(inp, storage_host=None):
     if (not isinstance(inp, dict) or set(inp) != {'profile', 'source_sha256', 'confirmation', 'samples'}
-            or inp['profile'] not in (PROFILE, 'channel-runs-v1', 'channel-repair-v1', 'channel-speech-v1', 'channel-speech-v2', 'channel-context-v1') or not isinstance(inp['samples'], list)
+            or inp['profile'] not in (PROFILE, 'channel-runs-v1', 'channel-repair-v1', 'channel-speech-v1', 'channel-speech-v2', 'channel-context-v1', 'channel-context-guard-v1') or not isinstance(inp['samples'], list)
             or len(inp['samples']) != 2 or any(not isinstance(s, dict)
                 or set(s) != {'id', 'sha256', 'media_url'} for s in inp['samples'])
             or [s['id'] for s in inp['samples']] != list(adapter.CHANNELS)
