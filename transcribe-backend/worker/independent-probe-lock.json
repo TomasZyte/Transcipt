@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "profile": "independent-speaker-switch-v1",
+  "algorithm": {
+    "version": "speaker-switch-repair-v1",
+    "policy": {
+      "max_island_seconds": 0.5,
+      "min_flank_seconds": 0.3,
+      "max_onset_difference_seconds": 0.05,
+      "min_shared_island_ratio": 0.8,
+      "word_edge_margin_seconds": 0.02,
+      "min_crossing_alignment_modes": 2
+    },
+    "code_sha256": {
+      "speaker_switch_repair.py": "19276da84dc51d1c8b258fa42f1e109aa27cfa2806e76537ed66bbbb4e75004e",
+      "pause_context.py": "d106a447acb4469dc056862fde3c7e38e77294beab186434986283e8e15fa94a",
+      "transcript_candidate.py": "b247bfb402f8c0bb45a04baa8c07e6dc87ffcd3228167cfbca4db4d0f3ca464c"
+    }
+  },
+  "model_sources_sha256": "8809e193e2721eed5f0243ad897b58e0a8da2d38cee3ec2525f1789442395d2e",
+  "asr_sources_sha256": "d0ba649c8cee553e2a7d57b6ce2520540211ee9bed76b96fa1525bf2f8f21ef0",
+  "decoder": {
+    "language": "ru",
+    "task": "transcribe",
+    "beam_size": 5,
+    "temperature": 0.0,
+    "condition_on_previous_text": false,
+    "word_timestamps": true,
+    "without_timestamps": false,
+    "vad_filter": false,
+    "initial_prompt": null,
+    "prefix": null,
+    "hotwords": null
+  },
+  "samples": [
+    {
+      "id": "call-check-01",
+      "sha256": "7251f66bbab8f78e90397f86f4f49f363f55a1774f62bcd124ada85d63e39deb",
+      "frames": 88000
+    },
+    {
+      "id": "call-check-02",
+      "sha256": "718e89e000817be7ab362d863fb445aa2d2818a7ff1f850a034ed2659e1bac09",
+      "frames": 72000
+    },
+    {
+      "id": "call-check-03",
+      "sha256": "02aaf8c03d939a55a259190bf98f266df876bc9f9a413aedebb3f637768d50ba",
+      "frames": 80000
+    },
+    {
+      "id": "call-check-04",
+      "sha256": "12566e331ad8a02ef4a6fbf45ea961602ad1a6d472c91a4555753d98b8de97bd",
+      "frames": 76416
+    }
+  ]
+}

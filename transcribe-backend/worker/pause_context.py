@@ -4,8 +4,10 @@ Keep WhisperX text and original audio common to every mode. No reference words,
 speaker roles, expected counts or manual timestamps are accepted by this worker.
 """
 import argparse
+from collections import Counter
 from copy import deepcopy
 import gc
+from itertools import combinations
 import os
 from pathlib import Path
 import subprocess
@@ -14,9 +16,12 @@ import tempfile
 import time
 
 import timed_turns as base
+from transcript_candidate import UNKNOWN, merge_intervals
 
 PROFILE = 'pause-context-v1'
 ALIGNMENTS = ('control', 'extend_tail', 'joint_window')
+APPROXIMATE_TIMING = 'тайминг приблизительный'
+UNRESOLVED_SPEAKER = 'спикер не определён'
 DIARIZATION = {key: deepcopy(base.DIARIZATION[key]) for key in ('short', 'dense')}
 MODES = {a + '_' + d: {'alignment': a, 'diarization': d}
          for a in ALIGNMENTS for d in DIARIZATION}
@@ -74,6 +79,274 @@ def realign(records, audio, align, mode):
     return {'segments': segments}, local
 
 
+def _word_times(segments):
+    tokens, times = [], []
+    for seg in segments:
+        previous = seg['start']
+        for word in seg.get('words', []):
+            a, b = word.get('start'), word.get('end')
+            valid = base.finite(a) and base.finite(b) and previous <= a < b <= seg['end']
+            tokens.append(word['word'].strip())
+            times.append((a, b) if valid else None)
+            if valid:
+                previous = a
+    return tokens, times
+
+
+def _timing_issue(intervals):
+    if None in intervals:
+        return 'missing_or_invalid_time'
+    if any(b - a > base.POLICY['max_word_seconds'] for a, b in intervals):
+        return 'long_word'
+    for (a, b), (c, d) in combinations(intervals, 2):
+        overlap = max(0., min(b, d) - max(a, c))
+        union = (b - a) + (d - c) - overlap
+        if max(abs(a - c), abs(b - d)) >= .25 and overlap < .5 * union:
+            return 'timings_disagree'
+    return None
+
+
+def phrase_timing_review(sample):
+    """Compare words by occurrence within the same audio window. Preserve the control phrases."""
+    phrases = []
+    for records in zip(*(sample['alignment_windows'][mode] for mode in ALIGNMENTS), strict=True):
+        window = records[0]['window']
+        if any(record['window'] != window for record in records):
+            raise ValueError('Cannot compare timings from different windows')
+        variants = [record['aligned_local']['segments'] for record in records]
+        tokens, times = zip(*(_word_times(segments) for segments in variants))
+        comparable = all(seq == tokens[0] for seq in tokens[1:])
+        offset = window['start_frame'] / base.RATE
+        index = 0
+        for seg in variants[0]:
+            count = len(seg.get('words', []))
+            phrase_tokens = tokens[0][index:index + count]
+            if not comparable or not count or base.plain(seg['text']) != base.plain(''.join(phrase_tokens)):
+                reasons = {'incomplete_word_comparison'}
+            else:
+                reasons = {_timing_issue([group[i] for group in times]) for i in range(index, index + count)}
+                reasons.discard(None)
+            phrases.append({'text': seg['text'], 'startSec': offset + seg['start'], 'endSec': offset + seg['end'],
+                            'timingNote': APPROXIMATE_TIMING if reasons else None, 'reasons': sorted(reasons)})
+            index += count
+    return phrases
+
+
+def _speaker_maps(tracks):
+    """Match anonymous IDs only when each voice overlaps the other for a majority of its time."""
+    durations, timelines = {}, {}
+    for mode in ('dense', 'short'):
+        totals = Counter()
+        intervals = []
+        for row in tracks[mode]['exclusive']:
+            start, end = (round(row[k] * 1_000_000) for k in ('start', 'end'))
+            if intervals and start < intervals[-1][1]:
+                raise ValueError('Cannot match speakers on overlapping exclusive turns')
+            label = row['speaker']
+            intervals.append((start, end, label))
+            totals[label] += end - start
+        durations[mode], timelines[mode] = totals, intervals
+    shared = Counter()
+    dense, short = timelines['dense'], timelines['short']
+    i = j = 0
+    while i < len(dense) and j < len(short):
+        a, b, first = dense[i]
+        c, d, second = short[j]
+        overlap = min(b, d) - max(a, c)
+        if overlap > 0:
+            shared[first, second] += overlap
+        if b <= d:
+            i += 1
+        if d <= b:
+            j += 1
+    matched = {second: first for (first, second), time in shared.items()
+               if UNKNOWN not in (first, second) and 2 * time > max(durations['dense'][first], durations['short'][second])}
+    return {'short': matched, 'dense': {label: label for label in matched.values()}}
+
+
+def _single_voice_phrases(sample, maps):
+    """Resolve one coverage-related abstention per phrase, without changing any word label."""
+    speech = {}
+    for track, mapping in maps.items():
+        evidence = sample['diarization'][track]
+        if len(mapping) != 1 or not evidence.get('regular'):
+            return {}
+        labels = {row['speaker'] for kind in ('regular', 'exclusive') for row in evidence[kind]}
+        if labels != set(mapping):
+            return {}
+        speech[track] = merge_intervals((row['start'], row['end']) for row in evidence['regular'])
+
+    resolved = {}
+    for index, variants in _matched_phrase_words(sample):
+        size = len(next(iter(variants.values())))
+        uncertain = {i for mode, words in variants.items() for i, (speaker, span) in enumerate(words)
+                     if speaker not in maps[MODES[mode]['diarization']] or span is None}
+        if size > 1 and len(uncertain) == 1:
+            i = uncertain.pop()
+            reason = _coverage_support({mode: words[i] for mode, words in variants.items()},
+                                       maps, speech, interior=0 < i < size - 1)
+            if reason:
+                resolved[index] = reason
+    return resolved
+
+
+def _matched_phrase_words(sample):
+    """Yield comparable word occurrences only if all six outputs reproduce the full transcript."""
+    control = sample['alignments']['control']['segments']
+    groups = [[base.plain(w['word']) for w in s.get('words', [])] for s in control]
+    tokens = [token for group in groups for token in group]
+    if any(''.join(g) != base.plain(s['text']) for g, s in zip(groups, control)):
+        return
+    variants = {}
+    for mode in MODES:
+        segments = sample['outputs'][mode]['attributed']['segments']
+        sequence, times = _word_times(segments)
+        if sequence != tokens or any(base.plain(seg['text']) != ''.join(base.plain(w['word']) for w in seg.get('words', []))
+                                     for seg in segments):
+            return
+        variants[mode] = [(w.get('speaker'), span) for w, span in
+                          zip((w for seg in segments for w in seg.get('words', [])), times, strict=True)]
+
+    pos = 0
+    for index, group in enumerate(groups):
+        end = pos + len(group)
+        yield index, {mode: words[pos:end] for mode, words in variants.items()}
+        pos = end
+
+
+def _coverage_support(observations, maps, speech, *, interior):
+    anchors, missing = [], []
+    for alignment in ALIGNMENTS:
+        pair = []
+        for track in DIARIZATION:
+            speaker, span = observations[alignment + '_' + track]
+            if span is None or span[1] - span[0] > base.POLICY['max_word_seconds']:
+                return None
+            if speaker in maps[track]:
+                pair.append(span)
+                continue
+            if speaker != UNKNOWN:
+                return None
+            a, b = span
+            pieces = [(max(a, x), min(b, y)) for x, y in speech[track] if a < y and x < b]
+            covered = sum(y-x for x, y in pieces)
+            if not 0 < covered < base.POLICY['speaker_min_coverage'] * (b-a):
+                return None
+            missing.append((span, pieces, covered))
+        if len(pair) == 2:
+            anchors.append((max(s[0] for s in pair), min(s[1] for s in pair)))
+    if not missing:
+        return None
+    if anchors and all(any(max(x, a) < min(y, b) for x, y in pieces for a, b in anchors)
+                       for _, pieces, _ in missing):
+        return 'same_word_confirmed_on_both_tracks'
+    if interior and all(len(pieces) == 2 and pieces[0][0] == a and pieces[-1][1] == b
+                        and pieces[1][0] - pieces[0][1] <= base.POLICY['min_pause_seconds']
+                        and covered > .5 * (b-a) for (a,b), pieces, covered in missing):
+        return 'single_voice_across_short_pause'
+    return None
+
+
+def _ends_in_silence(variants, tracks, maps):
+    """One stable local turn and word onset; only the final offset escapes into silence."""
+    labels, anchors, missing_tracks, starts = set(), [], set(), []
+    phrase_start, latest_end = float('inf'), 0.
+    for alignment in ALIGNMENTS:
+        pair = []
+        for track in DIARIZATION:
+            words = variants[alignment + '_' + track]
+            if len(words) < 2 or any(span is None for _, span in words):
+                return False
+            for speaker, span in words[:-1]:
+                if speaker not in maps[track] or span[1] - span[0] > base.POLICY['max_word_seconds']:
+                    return False
+                labels.add(maps[track][speaker])
+            speaker, (a, b) = words[-1]
+            if max(span[1] for _, span in words[:-1]) > a:
+                return False
+            if speaker in maps[track] and b - a <= base.POLICY['max_word_seconds']:
+                labels.add(maps[track][speaker])
+                pair.append((a, b))
+            elif speaker == UNKNOWN:
+                missing_tracks.add((track, b))
+            else:
+                return False
+            starts.append(a)
+            phrase_start = min(phrase_start, words[0][1][0])
+            latest_end = max(latest_end, b)
+        if len(pair) == 2:
+            anchors.extend(pair)
+    if len(labels) != 1 or not anchors or not missing_tracks:
+        return False
+    # The spread in onsets must be small relative to the shortest confirmed reading.
+    if max(starts) - min(starts) > .5 * min(b-a for a,b in anchors):
+        return False
+    voice = labels.pop()
+    for track, evidence in tracks.items():
+        for kind in ('regular', 'exclusive'):
+            rows = [r for r in evidence[kind] if r['start'] < latest_end and r['end'] > phrase_start]
+            if not rows or any(maps[track].get(r['speaker']) != voice for r in rows):
+                return False
+            runs = merge_intervals((r['start'], r['end']) for r in rows)
+            if len(runs) != 1:
+                return False
+            start, end = runs[0]
+            if start > phrase_start or max(starts) >= end or max(b for _, b in anchors) > end:
+                return False
+            if any(b <= end for t, b in missing_tracks if t == track):
+                return False
+    return True
+
+
+def phrase_speaker_review(sample, *, version=3):
+    """Use the original text positions, even when an alignment joins sentences or splits a word."""
+    phrases = [base.plain(s['text']) for s in sample['alignments']['control']['segments']]
+    text = ''.join(phrases)
+    maps = _speaker_maps(sample['diarization'])
+    if version not in (1, 2, 3):
+        raise ValueError('Unsupported phrase speaker review version')
+    supported = _single_voice_phrases(sample, maps) if version >= 2 else {}
+    tracks = sample['diarization']
+    if version >= 3 and all(len(maps[t]) >= 2 and tracks[t].get('regular') for t in DIARIZATION):
+        for index, variants in _matched_phrase_words(sample):
+            if _ends_in_silence(variants, tracks, maps):
+                supported[index] = 'same_local_voice_before_silence'
+    voices = []
+    for mode, definition in MODES.items():
+        segments = sample['outputs'][mode]['attributed']['segments']
+        if ''.join(base.plain(s['text']) for s in segments) != text:
+            raise ValueError('Cannot compare speakers on different transcripts')
+        mapping = maps[definition['diarization']]
+        labels = []
+        for seg in segments:
+            words = seg.get('words') or []
+            tokens = [base.plain(w['word']) for w in words]
+            sentence = base.plain(seg['text'])
+            if ''.join(tokens) != sentence:
+                # No positional match is reliable in this segment (e.g. omitted repeated word).
+                labels.extend([None] * len(sentence))
+                continue
+            for token, word in zip(tokens, words):
+                labels.extend([mapping.get(word.get('speaker'))] * len(token))
+        voices.append(labels)
+    result = []
+    start = 0
+    for index, phrase in enumerate(phrases):
+        end = start + len(phrase)
+        labels = {label for group in voices for label in group[start:end]}
+        reasons = []
+        if not labels or None in labels:
+            reasons.append('unassigned_or_unmatched_speaker')
+        if len(labels - {None}) > 1:
+            reasons.append('multiple_speaker_labels')
+        row = {'speakerNote': UNRESOLVED_SPEAKER if reasons else None, 'speakerReasons': reasons}
+        if reasons == ['unassigned_or_unmatched_speaker'] and index in supported:
+            row = {'speakerNote': None, 'speakerReasons': [], 'speakerSupport': supported[index]}
+        result.append(row)
+        start = end
+    return result
+
+
 def validate_sample(sample):
     duration = sample['duration_seconds']
     if (set(sample['diarization']) != set(DIARIZATION) or set(sample['alignments']) != set(ALIGNMENTS)
@@ -128,6 +401,11 @@ def validate_sample(sample):
                                  sample['diarization'][mode['diarization']]['regular'], duration)
         if sample['outputs'][name] != rebuilt:
             raise ValueError('Export cannot be reproduced')
+    if 'phraseTimingReview' in sample and sample['phraseTimingReview'] != phrase_timing_review(sample):
+        raise ValueError('Phrase timing review cannot be reproduced')
+    if 'phraseSpeakerReview' in sample and sample['phraseSpeakerReview'] != phrase_speaker_review(
+            sample, version=sample.get('phraseSpeakerReviewVersion', 1)):
+        raise ValueError('Phrase speaker review cannot be reproduced')
 
 
 def execute(manifest, output_path):
@@ -182,6 +460,9 @@ def execute(manifest, output_path):
                 for name, mode in MODES.items():
                     sample['outputs'][name] = base.attribute(sample['asr'], sample['alignments'][mode['alignment']],
                         sample['diarization'][mode['diarization']]['regular'], row['duration_seconds'])
+                sample['phraseTimingReview'] = phrase_timing_review(sample)
+                sample['phraseSpeakerReview'] = phrase_speaker_review(sample)
+                sample['phraseSpeakerReviewVersion'] = 3
                 validate_sample(sample)
                 gc.collect(); torch.cuda.empty_cache()
         state.update(status='completed', phase='complete')

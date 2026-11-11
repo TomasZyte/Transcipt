@@ -23,8 +23,8 @@ jobs:
         run: python3 -m unittest discover -s transcribe-backend/worker/tests -v
       - name: Free disposable runner space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-      - name: Build full test pipeline on CPU
-        run: docker build --progress=plain -f transcribe-backend/worker/Dockerfile.asr-full -t poslovnica-full:check transcribe-backend/worker
+      - name: Build independent switch test on CPU
+        run: docker build --progress=plain -f transcribe-backend/worker/Dockerfile.independent-switch -t poslovnica-full:check transcribe-backend/worker
       - name: Verify public models offline
         run: |
           docker run --rm --network=none --entrypoint python poslovnica-full:check -c '
@@ -42,6 +42,15 @@ jobs:
           assert os.environ["CHANNEL_ASR_TEST"] == "0"
           assert os.environ["CHANNEL_CONTEXT_TEST"] == "0"
           assert os.environ["CHANNEL_CONTEXT_GUARD_TEST"] == "0"
+          assert os.environ["INDEPENDENT_SWITCH_TEST"] == "0"
+          import independent_switch_probe as probe
+          probe.check_lock(probe.base.read_json("/opt/probe/lock.json"))
+          try:
+              probe.require_test()
+          except ValueError:
+              pass
+          else:
+              raise RuntimeError("Independent test must remain disabled by default")
           verify_assets("/opt/asr/model-lock.json", config_for("wx_auto"))
           verify_bundle("/opt/full/alignment", "alignment")
           verify_nltk("/opt/full")

@@ -1,2 +1,9 @@
 # This manifest's byte hash is compared across Windows clients and Linux images.
 transcribe-backend/worker/full_model_sources.json text eol=lf
+# Frozen independent-test evidence uses byte hashes on Windows and Linux.
+transcribe-backend/worker/asr_model_sources.json text eol=lf
+transcribe-backend/worker/pause_context.py text eol=lf
+transcribe-backend/worker/transcript_candidate.py text eol=lf
+transcribe-backend/worker/speaker_switch_repair.py text eol=lf
+transcribe-backend/worker/independent_switch_probe.py text eol=lf
+transcribe-backend/worker/independent-probe-lock.json text eol=lf
