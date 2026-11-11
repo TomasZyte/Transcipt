@@ -90,6 +90,20 @@ def result_for(locked):
 
 
 class IndependentProbeTests(unittest.TestCase):
+    def test_startup_registers_dedicated_handler_and_prints_identity(self):
+        registered=[]
+        sdk=SimpleNamespace(serverless=SimpleNamespace(start=lambda options:registered.append(options)))
+        locked=Path(p.__file__).with_name('independent-probe-lock.json')
+        with patch.dict(p.os.environ,ENV,clear=True),patch.dict(sys.modules,{'runpod':sdk}),\
+             patch.object(sys,'argv',['probe','--serve','--lock',str(locked)]),\
+             patch('builtins.print') as announce:
+            p.main()
+        self.assertEqual(registered,[{'handler':p.handler}])
+        message=p.json.loads(announce.call_args.args[0])
+        self.assertEqual(message['event'],'INDEPENDENT_PROBE_HANDLER_READY')
+        self.assertEqual(message['profile'],p.PROFILE)
+        self.assertEqual(message['lock_sha256'],p.base.digest(locked))
+
     def test_collection_calls_two_settings_and_three_alignments_without_hints(self):
         entry,calls=collect({'id':p.IDS[0],'sha256':'a'*64,'duration_seconds':6.})
         self.assertEqual(calls['diarize'],list(p.pause.DIARIZATION.values()))

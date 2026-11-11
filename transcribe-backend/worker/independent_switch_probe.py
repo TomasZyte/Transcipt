@@ -267,6 +267,8 @@ def main():
     if args.serve:
         require_test(); check_lock(base.read_json(args.lock))
         os.environ['INDEPENDENT_SWITCH_LOCK']=str(args.lock.resolve())
+        print(json.dumps({'event':'INDEPENDENT_PROBE_HANDLER_READY','profile':PROFILE,
+                          'lock_sha256':base.digest(args.lock)}),flush=True)
         import runpod
         runpod.serverless.start({'handler':handler})
     else:
