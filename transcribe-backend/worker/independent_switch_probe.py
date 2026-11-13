@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import wave
 
 import pause_context as pause
@@ -31,6 +32,45 @@ OTHER_FLAGS = ('ASR_COMPARISON_TEST','CONTEXT_ASR_TEST','SPEAKER_COMPARISON_TEST
     'SHORT_TURN_COMPARISON_TEST','RELEASE_CANDIDATE_TEST','TIMED_TURNS_TEST',
     'ACOUSTIC_TURNS_TEST','PAUSE_CONTEXT_TEST','CHANNEL_ASR_TEST','CHANNEL_CONTEXT_TEST',
     'CHANNEL_CONTEXT_GUARD_TEST','QUALITY_BENCHMARK')
+
+FAILURE_PHASES = frozenset(IDS + ['assets','verify_asr_assets','verify_alignment_assets',
+    'prepare_diarization_assets','load_runtime','load_vad','load_asr','load_alignment',
+    'load_diarization','validate_runtime','complete','validate','download_audio','child','validate_result'])
+FAILURE_MODULES = frozenset(['independent_switch_probe.py','timed_turns.py','pause_context.py',
+    'speaker_switch_repair.py','transcript_candidate.py','prepare_full_assets.py',
+    'asr_comparison.py','short_turn_comparison.py','speaker_comparison.py'])
+FAILURE_TYPES = frozenset(['ValueError','RuntimeError','TypeError','KeyError','AttributeError',
+    'ImportError','ModuleNotFoundError','OSError','FileNotFoundError','PermissionError',
+    'TimeoutExpired','TimeoutError','HTTPError','HfHubHTTPError','GatedRepoError',
+    'RepositoryNotFoundError','LocalEntryNotFoundError','OutOfMemoryError'])
+
+
+def failure_diagnostic(exc):
+    """Only fixed module names and line numbers: no messages, source or locals."""
+    frames = [{'module':Path(f.filename).name,'line':f.lineno}
+              for f in traceback.extract_tb(exc.__traceback__)
+              if Path(f.filename).name in FAILURE_MODULES][-8:]
+    return {'error_type':type(exc).__name__ if type(exc).__name__ in FAILURE_TYPES else 'Exception',
+            'failure_frames':frames}
+
+
+def child_failure(result):
+    """Preserve the child's failure instead of validating it as a successful run."""
+    result = result if isinstance(result,dict) else {}
+    frames = result.get('failure_frames',[])
+    safe_frames = []
+    if isinstance(frames,list):
+        for frame in frames[-8:]:
+            if (isinstance(frame,dict) and frame.get('module') in FAILURE_MODULES
+                    and type(frame.get('line')) is int and 0 < frame['line'] < 100000):
+                safe_frames.append({'module':frame['module'],'line':frame['line']})
+    samples = result.get('samples')
+    return {'profile':PROFILE,'status':'failed','phase':'child',
+            'error':'Independent switch probe failed',
+            'child_phase':result.get('phase') if result.get('phase') in FAILURE_PHASES else 'unknown',
+            'error_type':result.get('error_type') if result.get('error_type') in FAILURE_TYPES else 'Exception',
+            'completed_samples':len(samples) if isinstance(samples,list) and len(samples)<=4 else 0,
+            'failure_frames':safe_frames}
 
 
 def require_test():
@@ -101,6 +141,66 @@ def validate_local(manifest, lock):
     return rows
 
 
+def raw_annotation_rows(annotation):
+    """Keep the model's original clock, including any padded tail, for audit."""
+    return [{'start':float(turn.start),'end':float(turn.end),'speaker':str(label)}
+            for turn,_,label in annotation.itertracks(yield_label=True)]
+
+
+def bound_diarization(evidence, duration):
+    """Intersect model turns with real audio before planning windows/attribution.
+
+    pyannote pads short inputs to its segmentation window. Its annotation can
+    extend beyond the WAV (observed 5.59971875 for 5.5 s). Keep raw turns and an
+    exact replayable audit; never extend the audio, change labels or join turns.
+    Malformed/overlapping exclusive turns and empty real speech still fail.
+    """
+    if (not base.finite(duration) or duration <= 0
+            or not isinstance(evidence,dict)
+            or 'raw_timelines' in evidence or 'audio_bounds' in evidence):
+        raise ValueError('Expected original diarization and a positive audio duration')
+    result=deepcopy(evidence)
+    raw={}; changes={}
+    for kind in ('regular','exclusive'):
+        rows=evidence.get(kind)
+        if not isinstance(rows,list) or not rows:
+            raise ValueError('Missing original diarization timeline')
+        previous=-1.
+        bounded=[]; changes[kind]=[]
+        for index,row in enumerate(rows):
+            if (not isinstance(row,dict) or set(row)!={'start','end','speaker'}
+                    or not base.finite(row['start']) or not base.finite(row['end'])
+                    or not 0 <= row['start'] < row['end']
+                    or not isinstance(row['speaker'],str) or not row['speaker']
+                    or row['start'] < previous):
+                raise ValueError('Malformed original diarization timeline')
+            # Check before clipping too: padding must not hide bad exclusive data.
+            previous=row['end']-1e-6 if kind=='exclusive' else row['start']
+            clipped=dict(row,end=min(row['end'],duration)) if row['start']<duration else None
+            if clipped is not None:
+                bounded.append(clipped)
+            if clipped!=row:
+                changes[kind].append({'index':index,'before':deepcopy(row),'after':deepcopy(clipped)})
+        if not bounded:
+            raise ValueError('No diarization inside the actual audio')
+        base.validate_timeline(bounded,duration)
+        raw[kind]=deepcopy(rows)
+        result[kind]=bounded
+    result['raw_timelines']=raw
+    result['audio_bounds']={'version':'clip-to-audio-v1','duration_seconds':duration,'changes':changes}
+    return result
+
+
+def validate_diarization_bounds(evidence, duration):
+    if (not isinstance(evidence,dict) or not isinstance(evidence.get('raw_timelines'),dict)
+            or set(evidence['raw_timelines'])!={'regular','exclusive'}):
+        raise ValueError('Missing original model timelines')
+    original={k:deepcopy(v) for k,v in evidence.items() if k not in ('raw_timelines','audio_bounds')}
+    original.update(deepcopy(evidence['raw_timelines']))
+    if evidence!=bound_diarization(original,duration):
+        raise ValueError('Audio boundary correction does not replay')
+
+
 def collect_sample(row, audio, *, diarize, decode, align):
     """Callback boundary permits CPU tests, without substituting fake evidence in execution."""
     if len(audio)!=round(row['duration_seconds']*base.RATE):
@@ -109,7 +209,7 @@ def collect_sample(row, audio, *, diarize, decode, align):
             'diarization':{},'alignments':{},'alignment_windows':{},'outputs':{}}
     for name,settings in pause.DIARIZATION.items():
         # These are two real pipeline calls, never duplicates of a channel label.
-        sample['diarization'][name]=deepcopy(diarize(audio,deepcopy(settings)))
+        sample['diarization'][name]=bound_diarization(diarize(audio,deepcopy(settings)),row['duration_seconds'])
     windows=base.pause_windows(sample['diarization']['short']['exclusive'],len(audio))
     sample['asr'],_,sample['windows']=decode(audio,windows,align)
     for name in pause.ALIGNMENTS:
@@ -158,6 +258,8 @@ def validate_result(state, lock):
                 or original['duration_seconds']!=row['frames']/base.RATE):
             raise ValueError('Result belongs to other audio')
         pause.validate_sample(original)
+        for evidence in original['diarization'].values():
+            validate_diarization_bounds(evidence,original['duration_seconds'])
         candidate,audit=repair.propose(original)
         if entry['candidate']!=candidate or entry['repair_audit']!=audit:
             raise ValueError('Frozen correction does not replay')
@@ -179,23 +281,32 @@ def execute(manifest_path, lock_path, output_path):
     begun=time.perf_counter()
     try:
         config=base.config_for('wx_auto')
+        state['phase']='verify_asr_assets'
         assets=base.verify_assets('/opt/asr/model-lock.json',config)
+        state['phase']='verify_alignment_assets'
         alignment=base.verify_bundle('/opt/full/alignment','alignment'); nltk=base.verify_nltk('/opt/full')
         with tempfile.TemporaryDirectory(prefix='independent-model-') as temp:
             diar_root=Path(temp)/'diarization'
+            state['phase']='prepare_diarization_assets'
             diar_assets=base.prepare_diarization(diar_root,os.getenv('HF_TOKEN',''))
             state['runtime']={'asr':assets,'alignment':alignment,'diarization':diar_assets,'nltk_lock_sha256':nltk}
             with base.offline_models():
+                state['phase']='load_runtime'
                 import torch, whisperx
                 from importlib.metadata import version
                 from pyannote.audio import Pipeline
                 from whisperx.vads.pyannote import load_vad_model
                 base.verify_decoder_api()
                 state['runtime']['packages']={p:version(p) for p in ('torch','whisperx','pyannote.audio','faster-whisper')}
+                state['phase']='load_vad'
                 vad=load_vad_model('cuda',model_fp=assets['vad_path'],vad_onset=.5,vad_offset=.363)
+                state['phase']='load_asr'
                 model=whisperx.load_model(assets['root'],device='cuda',local_files_only=True,vad_model=vad,**deepcopy(config['load']))
+                state['phase']='load_alignment'
                 am,metadata=whisperx.load_align_model('ru','cuda',model_name='/opt/full/alignment',model_cache_only=True)
+                state['phase']='load_diarization'
                 pipeline=Pipeline.from_pretrained(str(diar_root),token=False).to(torch.device('cuda'))
+                state['phase']='validate_runtime'
                 base.validate_runtime_pipeline(pipeline,version('pyannote.audio'))
                 if pipeline._segmentation.model.specifications.duration!=10:
                     raise ValueError('Unexpected segmentation duration')
@@ -205,8 +316,8 @@ def execute(manifest_path, lock_path, output_path):
                         result=pipeline({'waveform':torch.from_numpy(audio[None,:]),'sample_rate':base.RATE})
                     return {'settings':actual,'parameters':base.model_evidence(pipeline.parameters(instantiated=True)),
                         'filter_diagnostics':diagnostics,
-                        'regular':base.annotation_rows(result.speaker_diarization,len(audio)/base.RATE,False),
-                        'exclusive':base.annotation_rows(result.exclusive_speaker_diarization,len(audio)/base.RATE,True)}
+                        'regular':raw_annotation_rows(result.speaker_diarization),
+                        'exclusive':raw_annotation_rows(result.exclusive_speaker_diarization)}
                 def align(segments, chunk):
                     return whisperx.align(segments,am,metadata,chunk,'cuda',return_char_alignments=False)
                 def decode(audio, windows, alignment_callback):
@@ -219,7 +330,7 @@ def execute(manifest_path, lock_path, output_path):
         state.update(status='completed',phase='complete')
         validate_result(state,lock)
     except Exception as exc:
-        state.update(status='failed',error='Independent probe failed',error_type=type(exc).__name__)
+        state.update(status='failed',error='Independent probe failed',**failure_diagnostic(exc))
     state['elapsed_seconds']=round(time.perf_counter()-begun,3)
     base.write_new(output_path,state)
     return state
@@ -248,11 +359,14 @@ def handler(job):
             if child.returncode or not opath.is_file():
                 raise RuntimeError('Missing independent evidence')
             result=base.read_json(opath)
+            if isinstance(result,dict) and result.get('status')=='failed':
+                return child_failure(result)
+            stage='validate_result'
             validate_result(result,lock)
             return result
     except Exception as exc:
         return {'profile':PROFILE,'status':'failed','phase':stage,
-                'error':'Independent switch probe failed','error_type':type(exc).__name__}
+                'error':'Independent switch probe failed',**failure_diagnostic(exc)}
 
 
 def main():

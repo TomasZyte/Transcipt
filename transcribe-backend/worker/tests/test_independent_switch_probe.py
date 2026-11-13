@@ -37,7 +37,7 @@ class Segment:
     words: list
 
 
-def collect(row):
+def collect(row, tail_seconds=0.):
     calls={'diarize':[],'decode':[],'align':[]}
     duration=row['duration_seconds']
     class Model:
@@ -51,7 +51,7 @@ def collect(row):
         calls['diarize'].append(deepcopy(settings))
         timeline=[{'start':0.,'end':1.,'speaker':'A'},
                   {'start':1.,'end':1.2,'speaker':'B'},
-                  {'start':1.2,'end':duration,'speaker':'A'}]
+                  {'start':1.2,'end':duration+tail_seconds,'speaker':'A'}]
         return {'settings':dict(settings,step_seconds=10*settings['step_ratio']),
                 'parameters':deepcopy(p.base.PARAMETERS),
                 'filter_diagnostics':[{'min_active_ratio':.1,'selected_embeddings':2,'chunk_speaker_pairs':2}],
@@ -90,6 +90,111 @@ def result_for(locked):
 
 
 class IndependentProbeTests(unittest.TestCase):
+    def test_observed_padded_tails_are_clipped_without_losing_original_model_times(self):
+        # Exact CPU observations from the approved 5.5 s / 5 s clips, not hints.
+        for duration,end in ((5.5,5.599718750000001),(5.,5.076593750000001)):
+            with self.subTest(duration=duration):
+                rows=[{'start':1.97159375,'end':end,'speaker':'SPEAKER_00'}]
+                before={'regular':deepcopy(rows),'exclusive':deepcopy(rows)}
+                result=p.bound_diarization(before,duration)
+                self.assertEqual(result['regular'],[dict(rows[0],end=duration)])
+                self.assertEqual(result['raw_timelines'],before)
+                self.assertEqual(before['regular'],rows)
+                self.assertEqual(result['audio_bounds']['changes']['regular'][0]['before']['end'],end)
+                p.validate_diarization_bounds(result,duration)
+
+    def test_padded_tail_no_longer_aborts_sample_and_real_short_answer_is_preserved(self):
+        row={'id':'call-check-01','sha256':'a'*64,'duration_seconds':5.5}
+        result,calls=collect(row,tail_seconds=.09971875)
+        baseline,candidate=result['baseline'],result['candidate']
+        self.assertEqual(len(calls['decode']),1)
+        self.assertEqual(result['repair_audit']['applied_pairs'],0)
+        for track in p.pause.DIARIZATION:
+            evidence=baseline['diarization'][track]
+            self.assertEqual(evidence['regular'][-1]['end'],5.5)
+            self.assertGreater(evidence['raw_timelines']['regular'][-1]['end'],5.5)
+            self.assertEqual(evidence['regular'][1],{'start':1.,'end':1.2,'speaker':'B'})
+            self.assertEqual(candidate['diarization'][track],evidence)
+        p.pause.validate_sample(baseline)
+
+    def test_crop_drops_only_turns_wholly_outside_audio_and_retains_overlapping_speech(self):
+        rows=[{'start':0.,'end':1.,'speaker':'A'},
+              {'start':.8,'end':1.2,'speaker':'B'},
+              {'start':1.2,'end':2.1,'speaker':'A'},
+              {'start':2.1,'end':2.3,'speaker':'B'}]
+        exclusive=[dict(rows[0],end=.8)]+deepcopy(rows[1:])
+        evidence={'regular':rows,'exclusive':exclusive}
+        result=p.bound_diarization(evidence,2.)
+        self.assertEqual(result['regular'],rows[:2]+[dict(rows[2],end=2.)])
+        self.assertEqual(result['raw_timelines'],evidence)
+        self.assertIsNone(result['audio_bounds']['changes']['regular'][-1]['after'])
+        p.validate_diarization_bounds(result,2.)
+
+    def test_crop_rejects_bad_model_data_instead_of_hiding_it_in_padding(self):
+        good={'start':0.,'end':1.,'speaker':'A'}
+        for bad in (dict(good,start=-.1),dict(good,end=float('nan')),
+                    dict(good,end=float('inf')),dict(good,start=2.),
+                    dict(good,speaker=''),dict(good,end=True)):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):
+                p.bound_diarization({'regular':[bad],'exclusive':[bad]},1.)
+        for rows in ([],[{'start':2.,'end':3.,'speaker':'A'}]):
+            with self.subTest(rows=rows),self.assertRaises(ValueError):
+                p.bound_diarization({'regular':rows,'exclusive':rows},1.)
+        # Invalid exclusive overlap outside the file is still an error.
+        overlap=[good,{'start':2.,'end':4.,'speaker':'A'},{'start':3.,'end':5.,'speaker':'B'}]
+        with self.assertRaises(ValueError):
+            p.bound_diarization({'regular':overlap,'exclusive':overlap},1.)
+
+    def test_boundary_audit_rejects_changed_turn_label_or_original_evidence(self):
+        rows=[{'start':0.,'end':5.6,'speaker':'A'}]
+        evidence=p.bound_diarization({'regular':rows,'exclusive':rows},5.5)
+        for target in ('bounded','raw','audit','missing'):
+            changed=deepcopy(evidence)
+            if target=='bounded': changed['regular'][0]['speaker']='B'
+            elif target=='raw': changed['raw_timelines']['regular'][0]['end']=5.7
+            elif target=='audit': changed['audio_bounds']['changes']['regular']=[]
+            else: del changed['raw_timelines']
+            with self.subTest(target=target),self.assertRaises(ValueError):
+                p.validate_diarization_bounds(changed,5.5)
+        with self.assertRaises(ValueError): p.bound_diarization(evidence,5.5)
+
+    def test_handler_preserves_failed_child_stage_without_validating_success_or_leaking_data(self):
+        child={'status':'failed','phase':'call-check-02','error_type':'RuntimeError',
+               'error':'hf_private secret https://private/?signature=token',
+               'samples':[{'text':'private conversation'}],
+               'failure_frames':[{'module':'timed_turns.py','line':96,'locals':'private'},
+                                 {'module':'private-account-name.py','line':123}]}
+        def run_child(args,**kwargs):
+            target=Path(args[args.index('--output')+1])
+            p.base.write_new(target,child)
+            return SimpleNamespace(returncode=0)
+        with tempfile.TemporaryDirectory() as directory:
+            locked=Path(directory)/'lock.json';p.base.write_new(locked,lock())
+            with patch.dict(p.os.environ,{**ENV,'INDEPENDENT_SWITCH_LOCK':str(locked)},clear=True),\
+                 patch.object(p,'validate_input',return_value=[]),patch.object(p,'validate_local',return_value=[]),\
+                 patch.object(p.subprocess,'run',side_effect=run_child),patch.object(p,'validate_result') as validate:
+                response=p.handler({'input':{}})
+        self.assertEqual(response['status'],'failed')
+        self.assertEqual(response['child_phase'],'call-check-02')
+        self.assertEqual(response['error_type'],'RuntimeError')
+        self.assertEqual(response['completed_samples'],1)
+        self.assertEqual(response['failure_frames'],[{'module':'timed_turns.py','line':96}])
+        self.assertNotIn('private',str(response));validate.assert_not_called()
+
+    def test_execute_records_asset_failure_phase_without_exception_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);lp=root/'lock.json';mp=root/'input.json';op=root/'output.json'
+            p.base.write_new(lp,lock());p.base.write_new(mp,{})
+            with patch.dict(p.os.environ,ENV,clear=True),patch.object(p,'validate_local',return_value=[]),\
+                 patch.object(p.base,'verify_assets',side_effect=ValueError('private-token-and-url')):
+                result=p.execute(mp,lp,op)
+            self.assertEqual(result['phase'],'verify_asr_assets')
+            self.assertEqual(result['status'],'failed')
+            self.assertEqual(result['error_type'],'ValueError')
+            self.assertEqual(p.base.read_json(op),result)
+            self.assertNotIn('private-token',str(result))
+            self.assertTrue(any(f['module']=='independent_switch_probe.py' for f in result['failure_frames']))
+
     def test_startup_registers_dedicated_handler_and_prints_identity(self):
         registered=[]
         sdk=SimpleNamespace(serverless=SimpleNamespace(start=lambda options:registered.append(options)))
