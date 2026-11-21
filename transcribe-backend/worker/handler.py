@@ -120,7 +120,21 @@ def _media_duration(path: str) -> float:
         ).stdout
         return float(json.loads(out).get("format", {}).get("duration") or 0)
     except Exception as e:
-        print(f"[ffprobe] не удалось прочитать длительность: {e}")
+        # Never interpolate exceptions: their command/output can contain private paths.
+        kind = 'duration_unavailable'
+        if isinstance(e, subprocess.TimeoutExpired):
+            kind = 'timeout'
+        elif isinstance(e, subprocess.CalledProcessError):
+            kind = 'probe_failed'
+        elif isinstance(e, FileNotFoundError):
+            kind = 'executable_or_file_missing'
+        elif isinstance(e, PermissionError):
+            kind = 'permission_denied'
+        elif isinstance(e, (ValueError, TypeError)):
+            kind = 'invalid_probe_output'
+        print('FFPROBE_DIAGNOSTIC_V1 ' + json.dumps({
+            'schema': 'ffprobe-safe-v1', 'stage': 'duration_probe', 'kind': kind,
+        }, sort_keys=True))
         return 0.0
 
 

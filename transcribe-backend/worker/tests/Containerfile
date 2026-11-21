@@ -1,0 +1,5 @@
+FROM docker.io/library/ubuntu:24.04
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 ffmpeg && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1
+WORKDIR /test
+ENTRYPOINT ["python3", "-B", "-S"]

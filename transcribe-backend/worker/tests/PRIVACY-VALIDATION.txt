@@ -1,0 +1,45 @@
+Validation: 2026-11-22, PR #3 ffmpeg + ffprobe safe diagnostics
+
+16 tests passed in local Linux: 11 adapter regressions, 3 actual media chains,
+1 malformed ffprobe JSON test and 1 test covering six exception classes.
+Ubuntu 24.04; ffmpeg package 7:6.1.1-3ubuntu5; Python 3.12.3-0ubuntu2.1.
+Production ffmpeg/version equivalence is NOT confirmed.
+
+The media tests call the real handler, _download, _media_duration, ffprobe,
+pipeline.extract_audio and ffmpeg. urlretrieve copies synthetic fixtures;
+RunPod registration and ASR/model processing after extract_audio are stubbed.
+This is the full media conversion/error path, not a full GPU transcription.
+The suite fails if real ffmpeg/ffprobe are unavailable (no silent skip).
+
+Results:
+- valid stereo WAV: mono PCM16 at 16 kHz, one-second duration preserved;
+- M4A without moov: safe ffprobe probe_failed, then missing_moov_atom;
+- video-only MP4: missing_audio_stream;
+- stdout, stderr, diagnostic logs and handler responses contain no synthetic
+  private path, phone, email, URL or signature canary;
+- six ffprobe exceptions and malformed JSON do not print command/output/text;
+- temporary downloaded files and conversion outputs are cleaned up.
+No raw subprocess stderr or media fixtures are committed.
+
+Reproduce from transcribe-backend/worker in Linux with Podman:
+  podman build -t localhost/media-privacy-tests -f tests/Containerfile tests
+  podman run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 1g --cpus 2 --tmpfs /tmp:rw,nosuid,nodev,size=256m -v "$PWD:/test:ro" localhost/media-privacy-tests -m unittest discover -s /test/tests -p 'test_*.py' -v
+Build downloads Ubuntu packages; the test container has no network or GPU.
+Future builds may resolve newer packages. The actual tested image ID and source
+hashes are recorded in privacy-results.json.
+
+Behavior and limits:
+Failed ffprobe still returns 0.0, preserving the pre-existing unknown-duration
+fallback; this change does not tighten duration enforcement or alter timeout.
+FFPROBE_DIAGNOSTIC_V1 contains only schema, stage and a fixed kind. No exception
+text, command, stdout, stderr or path is copied. yt-dlp, network download errors
+and unrelated application logging remain outside this privacy guarantee.
+
+Deployment/rollback:
+Draft only: no merge, deployment, production changes or paid jobs performed.
+Before deployment reverify the production base, validate the actual candidate
+image and preserve the previous ready release for runtime rollback. Do not
+substitute rebuilding an old commit for returning to the old ready artifact.
+Revert both PR commits for a source rollback; the earlier local reverse patch
+covers only the initial four-file change and is stale for the expanded PR.
+Any cloud validation, spending, merge or deployment requires separate approval.
