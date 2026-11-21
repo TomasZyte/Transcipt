@@ -70,13 +70,8 @@ def _load_diarizer():
 # --- Утилиты -----------------------------------------------------------------
 def extract_audio(media_path: str) -> str:
     """Любое аудио/видео -> WAV 16кГц mono через ffmpeg. Надёжнее, чем декодер браузера."""
-    out_path = tempfile.mktemp(suffix=".wav")
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", media_path, "-ar", "16000", "-ac", "1",
-         "-c:a", "pcm_s16le", out_path],
-        check=True, capture_output=True,
-    )
-    return out_path
+    from ffmpeg_diagnostics import extract_audio as safe_extract_audio
+    return safe_extract_audio(media_path)
 
 
 def _fmt_timestamp(total_sec: float) -> str:

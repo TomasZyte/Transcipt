@@ -1,0 +1,27 @@
+{
+  "date": "2026-11-22",
+  "platform": "linux",
+  "status": "passed",
+  "tests": 16,
+  "failures": 0,
+  "errors": 0,
+  "real_media_chain_cases": 3,
+  "ffmpeg_package": "7:6.1.1-3ubuntu5",
+  "python_package": "3.12.3-0ubuntu2.1",
+  "local_image_id": "b342a5d5152c8a142ea7e24c1ad82f8975000b0f29448120e87a5b1e7294d308",
+  "source_sha256": {
+    "handler.py": "fd747224ad94be11a74106c17c3a60281b191eccb9d5c24b3a56d160dbd2b979",
+    "pipeline.py": "0dd7100e34cffa22af86c33cd1cf00e67185a4cddfb501f30c2bad1104e03616",
+    "ffmpeg_diagnostics.py": "c581bd263b353ec016ab88f13fc09906aff0b9b70e425cf8c3ce66972fdcd348",
+    "Dockerfile": "4086a61956d9bcb6374591ed593b9f0f67cf2ebc037ede9c0ae6e0df4a993cbc",
+    "tests/test_ffmpeg_diagnostics.py": "9cec3c2a1218fb78513eaea3388d17925968f6e95a0affc9d31c891898d3423f",
+    "tests/test_media_privacy_chain.py": "67395346e603f0b1fcc9559270d49bfedb50b5bd4b0a2aaf45d82f09f0d77db9"
+  },
+  "production_equivalence_confirmed": false,
+  "stdout_stderr_diagnostic_logs_response_privacy_passed": true,
+  "network_during_tests": false,
+  "synthetic_media_only": true,
+  "runpod_and_models_stubbed": true,
+  "production_modified": false,
+  "paid_jobs_submitted": 0
+}
