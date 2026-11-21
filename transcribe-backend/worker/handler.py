@@ -34,6 +34,7 @@ import urllib.request
 
 import runpod
 from pipeline import process
+from ffmpeg_diagnostics import SafeMediaConversionError
 
 try:
     from pipeline import analyze as _analyze
@@ -197,6 +198,9 @@ def handler(job):
         if action in ("transcribe", ""):
             return _handle_transcribe(inp)
         return {"error": f"неизвестный action: {action}"}
+    except SafeMediaConversionError as e:
+        # Already logged as allowlisted JSON; never print subprocess context.
+        return {"error": str(e)}
     except Exception as e:
         traceback.print_exc()
         return {"error": f"{type(e).__name__}: {e}"}
